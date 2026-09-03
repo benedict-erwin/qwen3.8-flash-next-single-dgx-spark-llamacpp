@@ -1,0 +1,10 @@
+{"label": "fork-mtp3", "run": 2, "src": "llama.cpp/src/llama-kv-cache.cpp", "ttft_s": 23.28, "total_s": 30.97, "chunks": 256, "tokens": 256, "chars": 1056, "finish": "length", "decode_tps": 33.17}
+{"label": "fork-mtp3", "run": 3, "src": "llama.cpp/common/arg.cpp", "ttft_s": 19.9, "total_s": 25.92, "chunks": 256, "tokens": 256, "chars": 958, "finish": "length", "decode_tps": 42.36}
+{"label": "fork-mtp3-cached", "run": 2, "src": "llama.cpp/src/llama-kv-cache.cpp", "ttft_s": 3.2, "total_s": 10.39, "chunks": 256, "tokens": 256, "chars": 1033, "finish": "length", "decode_tps": 35.46}
+{"label": "fork-mtp3-cached", "run": 3, "src": "llama.cpp/common/arg.cpp", "ttft_s": 0.44, "total_s": 7.49, "chunks": 256, "tokens": 256, "chars": 1006, "finish": "length", "decode_tps": 36.19}
+{"label": "vllm", "run": 2, "src": "llama.cpp/src/llama-kv-cache.cpp", "ttft_s": 12.13, "total_s": 22.07, "chunks": 100, "tokens": 256, "chars": 1051, "finish": "length", "decode_tps": 25.65}
+{"label": "vllm", "run": 3, "src": "llama.cpp/common/arg.cpp", "ttft_s": 11.3, "total_s": 19.72, "chunks": 88, "tokens": 256, "chars": 952, "finish": "length", "decode_tps": 30.27}
+{"label": "vllm", "run": 4, "src": "llama.cpp/common/speculative.cpp", "ttft_s": 4.06, "total_s": 12.3, "chunks": 98, "tokens": 256, "chars": 1177, "finish": "length", "decode_tps": 30.93}
+{"label": "vllm-cached", "run": 2, "src": "llama.cpp/src/llama-kv-cache.cpp", "ttft_s": 1.86, "total_s": 10.56, "chunks": 106, "tokens": 256, "chars": 1051, "finish": "length", "decode_tps": 29.32}
+{"label": "vllm-cached", "run": 3, "src": "llama.cpp/common/arg.cpp", "ttft_s": 1.75, "total_s": 10.05, "chunks": 96, "tokens": 256, "chars": 952, "finish": "length", "decode_tps": 30.71}
+{"label": "vllm-cached", "run": 4, "src": "llama.cpp/common/speculative.cpp", "ttft_s": 2.0, "total_s": 10.18, "chunks": 101, "tokens": 256, "chars": 1177, "finish": "length", "decode_tps": 31.17}

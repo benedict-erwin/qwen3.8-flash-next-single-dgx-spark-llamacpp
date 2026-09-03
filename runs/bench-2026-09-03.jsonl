@@ -1,0 +1,15 @@
+{"label":"baseline-newbuild","run":1,"decode_tps":23.688414303120297,"prefill_tps":39.49660263389678,"n_decoded":256,"draft_n":null,"draft_accepted":null}
+{"label":"baseline-newbuild","run":2,"decode_tps":27.238171209958022,"prefill_tps":38.48855446611564,"n_decoded":256,"draft_n":null,"draft_accepted":null}
+{"label":"baseline-newbuild","run":3,"decode_tps":27.179946273240322,"prefill_tps":32.99622193258872,"n_decoded":256,"draft_n":null,"draft_accepted":null}
+{"label":"ngram-mod","run":1,"decode_tps":23.652259472521227,"prefill_tps":42.564542033904075,"n_decoded":256,"draft_n":null,"draft_accepted":null}
+{"label":"ngram-mod","run":2,"decode_tps":98.94516691661639,"prefill_tps":38.32996349070977,"n_decoded":256,"draft_n":256,"draft_accepted":211}
+{"label":"ngram-mod","run":3,"decode_tps":86.04809447338398,"prefill_tps":33.92590582168544,"n_decoded":256,"draft_n":248,"draft_accepted":201}
+{"label":"base-v2","run":1,"decode_tps":23.589926046969484,"prefill_tps":41.75580370875049,"n_decoded":256,"draft_n":null,"draft_accepted":null}
+{"label":"base-v2","run":2,"decode_tps":24.141378730233537,"prefill_tps":85.4730617400416,"n_decoded":256,"draft_n":null,"draft_accepted":null}
+{"label":"base-v2","run":3,"decode_tps":23.71401456412479,"prefill_tps":92.05851469340199,"n_decoded":256,"draft_n":null,"draft_accepted":null}
+{"label":"ngram-v2","run":1,"decode_tps":23.265519059204454,"prefill_tps":41.939740980159705,"n_decoded":256,"draft_n":null,"draft_accepted":null}
+{"label":"ngram-v2","run":2,"decode_tps":23.579359756579635,"prefill_tps":72.5322903010896,"n_decoded":256,"draft_n":null,"draft_accepted":null}
+{"label":"ngram-v2","run":3,"decode_tps":23.89183127982263,"prefill_tps":91.3836628856676,"n_decoded":256,"draft_n":null,"draft_accepted":null}
+{"label":"oldbuild-v2","run":1,"decode_tps":23.427795122002312,"prefill_tps":40.86113479543555,"n_decoded":256,"draft_n":null,"draft_accepted":null}
+{"label":"oldbuild-v2","run":2,"decode_tps":23.621248563619663,"prefill_tps":82.07784627731368,"n_decoded":256,"draft_n":null,"draft_accepted":null}
+{"label":"oldbuild-v2","run":3,"decode_tps":24.263394273781863,"prefill_tps":88.69105855549982,"n_decoded":256,"draft_n":null,"draft_accepted":null}

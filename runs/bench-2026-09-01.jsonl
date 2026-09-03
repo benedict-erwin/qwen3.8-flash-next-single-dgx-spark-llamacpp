@@ -1,0 +1,6 @@
+{"label":"baseline-nomtp","run":1,"decode_tps":21.780829675363997,"prefill_tps":54.37678763689356,"n_decoded":256,"draft_n":null,"draft_accepted":null}
+{"label":"baseline-nomtp","run":2,"decode_tps":21.830548882494202,"prefill_tps":29.56480605487228,"n_decoded":256,"draft_n":null,"draft_accepted":null}
+{"label":"baseline-nomtp","run":3,"decode_tps":24.435176112938425,"prefill_tps":9.09568432517981,"n_decoded":256,"draft_n":null,"draft_accepted":null}
+{"label":"ngram-spec","run":1,"decode_tps":21.85682000068742,"prefill_tps":40.48998277826066,"n_decoded":256,"draft_n":38,"draft_accepted":6}
+{"label":"ngram-spec","run":2,"decode_tps":24.325158108758067,"prefill_tps":38.52599541540655,"n_decoded":256,"draft_n":39,"draft_accepted":6}
+{"label":"ngram-spec","run":3,"decode_tps":24.67847336447531,"prefill_tps":34.79077696502657,"n_decoded":256,"draft_n":39,"draft_accepted":6}

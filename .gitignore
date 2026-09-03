@@ -1,0 +1,12 @@
+# Model weights, builds and third-party trees: large, and reproducible via the
+# download-*.sh scripts and SETUP.md.
+models/
+llama.cpp/
+forks/
+vllm-dgx/
+
+# Server and build logs; benchmark results (runs/*.jsonl) are kept.
+*.log
+
+tmp/
+__pycache__/
