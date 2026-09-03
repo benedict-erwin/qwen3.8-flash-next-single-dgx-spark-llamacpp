@@ -6,9 +6,18 @@ timing is measured the same way for both: TTFT is the wall time until the first
 token arrives, decode rate is the remaining tokens over the remaining time.
 Server-reported `timings` differ between the two and cannot be compared.
 """
-import json, sys, time, urllib.request, statistics as st
+import json, os, sys, time, urllib.request, statistics as st
+
+# Run from the script's own directory so the relative prompt sources and the
+# runs/ output path resolve no matter where this is invoked from.
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 PORT, LABEL, RUNS = sys.argv[1], sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 3
+HOST = os.environ.get("HOST", "127.0.0.1")          # match serve.sh / stack.sh
+API_KEY = os.environ.get("API_KEY", "")
+HDRS = {"Content-Type": "application/json"}
+if API_KEY:
+    HDRS["Authorization"] = "Bearer " + API_KEY
 
 SRCS = ["llama.cpp/common/speculative.cpp",
         "llama.cpp/src/llama-kv-cache.cpp",
@@ -21,7 +30,8 @@ def model_id():
     """vLLM 404s on an unknown model name; llama.cpp ignores the field. Ask the
     server which model it serves instead of guessing."""
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/v1/models", timeout=30) as r:
+        req = urllib.request.Request(f"http://{HOST}:{PORT}/v1/models", headers=HDRS)
+        with urllib.request.urlopen(req, timeout=30) as r:
             return json.load(r)["data"][0]["id"]
     except Exception as e:
         print(f"!! could not read /v1/models ({e}), falling back to 'default'", file=sys.stderr)
@@ -32,6 +42,11 @@ MODEL = model_id()
 
 def run(i):
     src, task = SRCS[i % 3], TASKS[i % 3]
+    if not os.path.exists(src):
+        sys.exit(f"missing prompt source: {src}\n"
+                 "These benchmarks read real llama.cpp sources so the prompt stays\n"
+                 "identical across runs and machines. Clone it first (see SETUP.md):\n"
+                 "  git clone https://github.com/ggml-org/llama.cpp.git")
     ctx = open(src, encoding="utf-8", errors="replace").read()[:40000]
     prompt = f"{task}\n\n```cpp\n{ctx}\n```\n"
     # include_usage makes the server report completion_tokens, so we never have
@@ -40,8 +55,7 @@ def run(i):
     body = json.dumps({"model": MODEL, "prompt": prompt, "max_tokens": 256,
                        "temperature": 0, "stream": True,
                        "stream_options": {"include_usage": True}}).encode()
-    req = urllib.request.Request(f"http://127.0.0.1:{PORT}/v1/completions", body,
-                                 {"Content-Type": "application/json"})
+    req = urllib.request.Request(f"http://{HOST}:{PORT}/v1/completions", body, HDRS)
     t0 = time.perf_counter(); ttft = None; n = 0; chars = 0
     usage_tok = None; finish = None
     with urllib.request.urlopen(req, timeout=900) as r:

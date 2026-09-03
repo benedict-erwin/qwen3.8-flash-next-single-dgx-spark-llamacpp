@@ -87,10 +87,21 @@ mem-bypass-nya secara manual.
 
 ## Benchmark ulang
 
+Prompt benchmark dibaca dari source `llama.cpp` asli supaya identik lintas run dan
+lintas mesin. `llama.cpp/` di-gitignore, jadi di fresh clone perlu diambil dulu:
+
 ```bash
-./bench-code.sh <label> 3        # prompt panjang berisi kode, via /completion llama.cpp
-python3 bench-stream.py <port> <label> 3    # streaming, jalan untuk kedua stack
+git clone https://github.com/ggml-org/llama.cpp.git      # tidak perlu di-build
 ```
+
+```bash
+./bench-code.sh <label> 3                    # via /completion llama.cpp
+python3 bench-stream.py <port> <label> 3     # streaming, jalan untuk kedua stack
+HOST=tailscale API_KEY=<key> python3 bench-stream.py 18080 remote 3   # dari jauh
+```
+
+Semua script bisa dipanggil dari direktori mana pun — masing-masing pindah ke
+direktorinya sendiri lebih dulu.
 
 `bench-stream.py` yang dipakai untuk membandingkan lintas stack: mengukur dari sisi
 klien dan membaca jumlah token dari `usage.completion_tokens`. Jangan bandingkan

@@ -29,7 +29,9 @@ TASKS=(
 for i in $(seq 1 "$RUNS"); do
   idx=$(( (i - 1) % ${#SRCS[@]} ))
   src="${SRCS[$idx]}"
-  [[ -f "$src" ]] || { echo "missing source: $src" >&2; exit 1; }
+  # Prompts are real llama.cpp sources so they stay identical across runs and
+  # machines; llama.cpp/ is gitignored, so a fresh clone must fetch it first.
+  [[ -f "$src" ]] || { echo "missing prompt source: $src -- git clone https://github.com/ggml-org/llama.cpp.git (see SETUP.md)" >&2; exit 1; }
   # ~6000 lines is far more than needed; cap to keep the prompt near 8-16k tokens.
   ctx=$(head -c 40000 "$src")
   prompt=$(printf '%s\n\n```cpp\n%s\n```\n' "${TASKS[$idx]}" "$ctx")
