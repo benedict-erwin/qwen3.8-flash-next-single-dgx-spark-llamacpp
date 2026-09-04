@@ -136,7 +136,8 @@ Notes:
   context; that costs about 6 GiB more.
 - Responses report `usage.prompt_tokens_details.cached_tokens`, so you can measure
   your real prefix-cache hit rate — the number that decides whether llama.cpp or
-  vLLM suits your usage.
+  vLLM suits your usage. `./cache-ratio.py -v` computes the same thing server-side
+  from `runs/serve-current.log` after a real session, so no client changes are needed.
 
 ## Documents
 
@@ -158,3 +159,4 @@ Notes:
 | `download-fork.sh` | Unsloth llama.cpp prebuilt — required for MTP |
 | `bench-code.sh` | coding-shaped benchmark against llama.cpp |
 | `bench-stream.py` | streaming benchmark; the only one valid for comparing across backends |
+| `cache-ratio.py` | prefix-cache hit rate of real usage, reconstructed from the llama-server log |

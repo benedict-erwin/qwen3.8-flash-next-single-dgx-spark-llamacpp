@@ -195,7 +195,11 @@ Tetap begitu, resident ~77 GiB + KV masih belum nyaman berdampingan dengan beban
 - Angka speedup MTP Unsloth (1.67×, "83.2 → 138.8 tok/s") jelas **bukan** dari GB10 — hardware tidak disebut `[Belum Terverifikasi]`. Yang bisa dipindah ke kasus kita hanyalah **acceptance rate ~66%**.
 - Proyeksi 31–39 tok/s diturunkan dari Strix Halo & M3 Max (sama-sama unified memory) `[estimate]`. PR #27836 mencatat CUDA unified memory dapat "gain serupa", tapi tidak ada angka GB10 spesifik yang saya temukan.
 - `--spec-type ngram-mod` belum pernah kita ukur sama sekali.
-- Retensi akurasi NVFP4 (opsi B) masih belum diukur pihak ketiga.
+- Retensi akurasi NVFP4 (opsi B): belum ada pengukuran independen. Model card RadixArk
+  (checkpoint yang dipakai `vllm-dgx`) melaporkan GSM8K 97.27 vs BF16 97.12–97.50 dan
+  AIME26 pass@1 98.75 vs 100, dengan catatan BF16-nya dari revisi checkpoint lebih lama —
+  vendor-reported, indikatif `[Belum Terverifikasi]`. Tidak sebanding langsung dengan 92.3%
+  Unsloth (metrik berbeda: "top-1% accuracy" vs task score).
 - Tidak ada draft head DFlash/DSpark untuk Flash-Next (yang beredar hanya untuk Qwen3.8-27B) — jalur itu tertutup untuk sekarang.
 
 ## Sumber
@@ -419,11 +423,13 @@ llama.cpp justru sedikit lebih cepat. Di luar kecepatan:
 |---|---|---|
 | RAM | 88 GiB (sisa 33) | 112 GiB (sisa ~8) |
 | Restart | 45 detik | 14 menit |
-| Retensi akurasi | 92.3% terdokumentasi | **belum terukur** |
+| Retensi akurasi | 92.3% (Unsloth, top-1% accuracy) | GSM8K 97.27 vs BF16 ~97.3, vendor-reported `[Belum Terverifikasi]` |
 | Stack | satu binary | docker + vLLM patched |
 
 Margin memori vLLM (~8 GiB) berbahaya di mesin ini mengingat insiden watchdog 2026-09-01.
 
 **Pindah ke vLLM baru masuk akal kalau** beban kerjanya ternyata didominasi konteks yang
 selalu baru (>12% cold), misalnya memindai banyak file berbeda tiap panggilan. Itu bisa
-diukur dari pola pemakaian nyata, bukan ditebak sekarang.
+diukur dari pola pemakaian nyata, bukan ditebak sekarang: `./cache-ratio.py -v` membaca
+`runs/serve-current.log` setelah sesi nyata dan melaporkan rasio cold call terhadap titik
+impas ini. Log benchmark sengaja 100% cold (prompt berbeda tiap run), jadi tidak mewakili.

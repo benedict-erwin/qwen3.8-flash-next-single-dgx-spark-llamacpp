@@ -98,6 +98,7 @@ git clone https://github.com/ggml-org/llama.cpp.git      # tidak perlu di-build
 ./bench-code.sh <label> 3                    # via /completion llama.cpp
 python3 bench-stream.py <port> <label> 3     # streaming, jalan untuk kedua stack
 HOST=tailscale API_KEY=<key> python3 bench-stream.py 18080 remote 3   # dari jauh
+./cache-ratio.py -v                          # rasio cache hit dari runs/serve-current.log
 ```
 
 Semua script bisa dipanggil dari direktori mana pun — masing-masing pindah ke
@@ -108,6 +109,12 @@ klien dan membaca jumlah token dari `usage.completion_tokens`. Jangan bandingkan
 angka dari `bench.sh`/`bench-code.sh` (timings sisi server llama.cpp) dengan angka
 vLLM — definisinya berbeda. Tiga cacat metodologi yang pernah terjadi tercatat di
 `OPTIMIZATION.md`.
+
+`cache-ratio.py` menjawab pertanyaan yang ditinggalkan `OPTIMIZATION.md`: berapa persen
+panggilan nyata yang cold. Ia membaca log llama-server (bukan benchmark), merekonstruksi
+token yang di-cache per request dari `prompt eval` vs `n_tokens` saat release, dan
+membandingkannya dengan titik impas 12%. Jalankan setelah sesi coding agent sungguhan,
+bukan setelah benchmark — prompt benchmark sengaja berbeda tiap run.
 
 ## Menyambungkan coding agent / harness
 
