@@ -189,7 +189,9 @@ Kalau laptop memakai NVIDIA Sync (bukan aplikasi Tailscale), `HOST=tailscale` ti
 dijangkau dari laptop itu — node Tailscale Sync tertanam di dalam aplikasi, OS laptop
 tidak punya interface `100.x`. Pakai port-forward Sync: Settings → Custom → Add New,
 port 18080, launch script `cd <repo> && API_KEY=<key> ./stack.sh start llamacpp`,
-`HOST` biarkan default; `baseUrl` di laptop jadi `http://127.0.0.1:18080/v1`. Detail di
+`HOST` biarkan default. Setelah dibuat, **klik entry-nya** di daftar Custom sampai
+titik statusnya hijau — Add hanya menyimpan definisi, forward baru aktif setelah diklik.
+`baseUrl` di laptop jadi `http://127.0.0.1:18080/v1`. Detail di
 README "Reaching the server from another machine". Diverifikasi 2026-09-04.
 
 Setiap field disetel dari hasil probe ke server yang benar-benar jalan (2026-09-04),

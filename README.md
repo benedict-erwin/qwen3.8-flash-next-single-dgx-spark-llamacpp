@@ -110,7 +110,11 @@ for the model server too (verified 2026-09-04):
    loopback bind is exactly right — and the server never listens on WiFi or the
    tailnet at all. `stack.sh start` returns once the server is up (~45 s) and leaves
    it running in the background.
-4. On the laptop the base URL is `http://127.0.0.1:18080/v1`.
+4. **Click the new entry** in the Custom list. Adding it only saves the definition;
+   the forward is not active until the entry is clicked and its status dot turns
+   green. Until then `127.0.0.1:18080` on the laptop refuses connections even though
+   the server is up on the DGX.
+5. On the laptop the base URL is `http://127.0.0.1:18080/v1`.
 
 Two simpler alternatives when both machines are on the same WiFi: bind to the DGX's
 LAN address directly (`HOST=192.168.x.y API_KEY=<key> ./stack.sh start llamacpp`;
