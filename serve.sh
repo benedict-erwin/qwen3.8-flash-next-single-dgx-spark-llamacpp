@@ -22,6 +22,10 @@ if [[ "$BUILD" == "fork" ]]; then
   export LD_LIBRARY_PATH="$PWD/$FORKDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 else
   BIN="llama.cpp/$BUILD/bin/llama-server"
+  # The binary's RUNPATH is the absolute build directory, so it breaks as soon
+  # as the tree is moved or cloned elsewhere. Point the loader at the libs
+  # next to the binary explicitly.
+  export LD_LIBRARY_PATH="$PWD/llama.cpp/$BUILD/bin${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
 MODEL=models/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf
 MTP=models/MTP/mtp-Qwen3.8-Flash-Next-Q8_0.gguf
@@ -47,6 +51,9 @@ CTX="${CTX:-131072}"
 # --alias gives the API a clean model name; without it clients see the full
 # gguf path as the model id, which some harnesses reject or mangle.
 ALIAS="${ALIAS:-qwen3.8-flash-next}"
+# Physical batch size for prefill. Unset = llama.cpp default (2048 logical / 512
+# physical). See OPTIMIZATION.md "Crash CUDA pada ukuran batch tertentu".
+UBATCH="${UBATCH:-}"
 
 EXTRA=()
 LABEL="baseline"
@@ -85,6 +92,7 @@ exec "$BIN" \
   --cache-type-k q8_0 --cache-type-v q8_0 \
   -c "$CTX" \
   -a "$ALIAS" \
+  ${UBATCH:+-ub "$UBATCH"} \
   "${LOADMODE[@]}" \
   "${EXTRA[@]}" \
   ${API_KEY:+--api-key "$API_KEY"} \

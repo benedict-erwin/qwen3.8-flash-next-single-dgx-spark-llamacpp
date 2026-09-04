@@ -85,6 +85,11 @@ mem-bypass-nya secara manual.
 ./stack.sh status        # cek sebelum apa pun
 ```
 
+`stack.sh` menjalankan llama-server dengan `-ub 256`. Tanpa itu backend CUDA (fork
+maupun upstream) bisa abort di `cublasGemmEx` pada batch prefill tertentu — satu prompt
+HumanEval mereproduksinya setiap kali, sweep menemukan ukuran 367 dan 512 ikut crash.
+Kalau memanggil `serve.sh` langsung, set `UBATCH=256`. Detail di `OPTIMIZATION.md`.
+
 ## Benchmark ulang
 
 Prompt benchmark dibaca dari source `llama.cpp` asli supaya identik lintas run dan
@@ -99,6 +104,7 @@ git clone https://github.com/ggml-org/llama.cpp.git      # tidak perlu di-build
 python3 bench-stream.py <port> <label> 3     # streaming, jalan untuk kedua stack
 HOST=tailscale API_KEY=<key> python3 bench-stream.py 18080 remote 3   # dari jauh
 ./cache-ratio.py -v                          # rasio cache hit dari runs/serve-current.log
+tmp/eval-venv/bin/python bench-accuracy.py 18080 <label> --concurrent 1   # akurasi (lihat bawah)
 ```
 
 Semua script bisa dipanggil dari direktori mana pun — masing-masing pindah ke
@@ -115,6 +121,21 @@ panggilan nyata yang cold. Ia membaca log llama-server (bukan benchmark), mereko
 token yang di-cache per request dari `prompt eval` vs `n_tokens` saat release, dan
 membandingkannya dengan titik impas 12%. Jalankan setelah sesi coding agent sungguhan,
 bukan setelah benchmark — prompt benchmark sengaja berbeda tiap run.
+
+### Akurasi (`bench-accuracy.py`)
+
+Butuh venv sekali pakai di `tmp/` (tidak di-track):
+
+```bash
+uv venv tmp/eval-venv --python 3.12
+VIRTUAL_ENV=$PWD/tmp/eval-venv uv pip install "lm_eval[api]" evalplus
+```
+
+Dataset (GSM8K, HumanEval+) diunduh ke `tmp/hf-cache` dan `tmp/evalplus-cache`, bukan ke
+`~/.cache/huggingface` yang dimiliki root oleh container vLLM. Jalankan dengan
+`--concurrent 1` di llama.cpp + MTP (upstream #28286: kontaminasi antar slot); di vLLM
+`--concurrent 4` aman. GSM8K 300 soal + HumanEval+ 164 ≈ 50 menit per backend. Baca skor
+`acc_final_para`, bukan `acc_flexible_extract` — alasannya di `OPTIMIZATION.md`.
 
 ## Menyambungkan coding agent / harness
 

@@ -80,7 +80,11 @@ start)
   llamacpp)
     preflight "$NEED_LC" || exit 1
     echo ">> starting llama.cpp fork + MTP (port $LC_PORT), ~45s"
-    BUILD=fork nohup ./serve.sh --mtp --nmax 3 > runs/serve-current.log 2>&1 &
+    # -ub 256: the CUDA backend aborts in cublasGemmEx on some prefill batch
+    # sizes (367 and 512 seen in a 300-600 sweep; upstream is affected too).
+    # Capping the physical batch at 256 avoided every size in 1-600. See
+    # OPTIMIZATION.md "Crash CUDA pada ukuran batch tertentu".
+    UBATCH="${UBATCH:-256}" BUILD=fork nohup ./serve.sh --mtp --nmax 3 > runs/serve-current.log 2>&1 &
     if wait_ready "$LC_PORT" 300; then
       echo ">> READY  http://$HOST:$LC_PORT/v1  (used $(used_gib) GiB, available $(avail) GiB)"
     else

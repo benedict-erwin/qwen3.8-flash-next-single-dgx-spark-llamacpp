@@ -31,6 +31,24 @@ or when memory is short. Do not bypass it: the three of them share 121.7 GiB of
 unified memory, and overcommitting it caused an `NVRM NV_ERR_NO_MEMORY` stall and a
 watchdog kernel panic on 2026-09-01.
 
+It also starts llama-server with `-ub 256`. The CUDA backend (Unsloth fork and
+upstream alike) aborts in `cublasGemmEx` on certain prefill batches — one HumanEval
+prompt reproduced it every time — and capping the physical batch at 256 avoided every
+case we could reproduce. Details and the sweep in `OPTIMIZATION.md`.
+
+## Accuracy of the two quants
+
+Measured on this machine, same harness and decoding settings on both backends, thinking
+off, greedy (`runs/accuracy-2026-09-04.jsonl`, details in `OPTIMIZATION.md`):
+
+| | llama.cpp UD-Q4_K_XL | vLLM NVFP4 |
+|---|---|---|
+| GSM8K, 300 items | 97.3% | 97.0% |
+| HumanEval+ pass@1 (plus tests) | 93.9% | 95.7% |
+
+Equivalent within noise; the problems that fail are mostly the same ones on both. BF16 does
+not fit on the GB10, so this is a relative measurement, not an absolute retention figure.
+
 ## Using it from a coding agent
 
 The server speaks the OpenAI API, so any harness that accepts a custom base URL
@@ -153,10 +171,11 @@ Notes:
 | Script | Purpose |
 |---|---|
 | `stack.sh` | start / stop / status for either backend, with a memory preflight |
-| `serve.sh` | launches llama-server directly (`--mtp`, `--ngram-mod`, `--mmap`, `CTX=`, `BUILD=`) |
+| `serve.sh` | launches llama-server directly (`--mtp`, `--ngram-mod`, `--mmap`, `CTX=`, `BUILD=`, `UBATCH=`) |
 | `download-parts.sh` | main GGUF, 104 GiB |
 | `download-mtp.sh` | MTP draft head, 3.85 GiB |
 | `download-fork.sh` | Unsloth llama.cpp prebuilt — required for MTP |
 | `bench-code.sh` | coding-shaped benchmark against llama.cpp |
 | `bench-stream.py` | streaming benchmark; the only one valid for comparing across backends |
 | `cache-ratio.py` | prefix-cache hit rate of real usage, reconstructed from the llama-server log |
+| `bench-accuracy.py` | GSM8K + HumanEval+ through the API, same settings on either backend |

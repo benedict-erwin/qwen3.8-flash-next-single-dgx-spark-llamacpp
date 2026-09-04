@@ -195,11 +195,9 @@ Tetap begitu, resident ~77 GiB + KV masih belum nyaman berdampingan dengan beban
 - Angka speedup MTP Unsloth (1.67×, "83.2 → 138.8 tok/s") jelas **bukan** dari GB10 — hardware tidak disebut `[Belum Terverifikasi]`. Yang bisa dipindah ke kasus kita hanyalah **acceptance rate ~66%**.
 - Proyeksi 31–39 tok/s diturunkan dari Strix Halo & M3 Max (sama-sama unified memory) `[estimate]`. PR #27836 mencatat CUDA unified memory dapat "gain serupa", tapi tidak ada angka GB10 spesifik yang saya temukan.
 - `--spec-type ngram-mod` belum pernah kita ukur sama sekali.
-- Retensi akurasi NVFP4 (opsi B): belum ada pengukuran independen. Model card RadixArk
-  (checkpoint yang dipakai `vllm-dgx`) melaporkan GSM8K 97.27 vs BF16 97.12–97.50 dan
-  AIME26 pass@1 98.75 vs 100, dengan catatan BF16-nya dari revisi checkpoint lebih lama —
-  vendor-reported, indikatif `[Belum Terverifikasi]`. Tidak sebanding langsung dengan 92.3%
-  Unsloth (metrik berbeda: "top-1% accuracy" vs task score).
+- Retensi akurasi NVFP4 (opsi B): **diukur sendiri 2026-09-04**, setara dengan UD-Q4_K_XL
+  pada GSM8K dan HumanEval+ — lihat bagian "Retensi akurasi: diukur" di bawah. Model card
+  RadixArk melaporkan GSM8K 97.27 vs BF16 97.12–97.50 (vendor-reported).
 - Tidak ada draft head DFlash/DSpark untuk Flash-Next (yang beredar hanya untuk Qwen3.8-27B) — jalur itu tertutup untuk sekarang.
 
 ## Sumber
@@ -423,7 +421,7 @@ llama.cpp justru sedikit lebih cepat. Di luar kecepatan:
 |---|---|---|
 | RAM | 88 GiB (sisa 33) | 112 GiB (sisa ~8) |
 | Restart | 45 detik | 14 menit |
-| Retensi akurasi | 92.3% (Unsloth, top-1% accuracy) | GSM8K 97.27 vs BF16 ~97.3, vendor-reported `[Belum Terverifikasi]` |
+| Retensi akurasi (diukur, thinking off) | GSM8K 97.3%, HumanEval+ 93.9% | GSM8K 97.0%, HumanEval+ 95.7% |
 | Stack | satu binary | docker + vLLM patched |
 
 Margin memori vLLM (~8 GiB) berbahaya di mesin ini mengingat insiden watchdog 2026-09-01.
@@ -433,3 +431,98 @@ selalu baru (>12% cold), misalnya memindai banyak file berbeda tiap panggilan. I
 diukur dari pola pemakaian nyata, bukan ditebak sekarang: `./cache-ratio.py -v` membaca
 `runs/serve-current.log` setelah sesi nyata dan melaporkan rasio cold call terhadap titik
 impas ini. Log benchmark sengaja 100% cold (prompt berbeda tiap run), jadi tidak mewakili.
+
+---
+
+## 2026-09-04: Crash CUDA saat prefill — fork DAN upstream, mitigasi `-ub 256`
+
+Ditemukan saat menjalankan `bench-accuracy.py` (HumanEval+): llama-server mati di soal
+`HumanEval/68` dengan
+
+```
+CUDA error: an internal operation failed
+  in function ggml_cuda_mul_mat_cublas_impl at ggml-cuda.cu:1623 (cublasGemmEx)
+```
+
+Reproduksi deterministik: server baru start, satu request prompt itu (381 token prompt,
+thinking off), mati dalam 1 detik. Bukan OOM — available 116 GiB saat itu.
+
+**Isolasi** (`runs/crash-sweep-2026-09-04.jsonl`, log crash di `runs/serve-crash-*.log`):
+
+| Konfigurasi | Prompt HumanEval/68 |
+|---|---|
+| fork Unsloth b10715 + MTP | crash |
+| fork Unsloth b10715 tanpa MTP | crash |
+| upstream `0ba6499` (build-new) `--ngram-mod` | crash |
+| fork + MTP, **`-ub 256`** | **jalan** (474 token completion) |
+
+Jadi bukan MTP dan bukan fork — bug backend CUDA llama.cpp di GB10 (sm_121), ada di
+upstream juga. Sweep prompt netral (token id mentah lewat `/completion`, `cache_prompt`
+off) ukuran 300–600 pada `-ub` default: hanya **367 dan 512** yang crash; tapi 381 netral
+*tidak* crash padahal prompt HumanEval/68 (381 token) crash. Pemicunya **bergantung data,
+bukan sekadar ukuran batch** — `[Inferensi]` bentuk GEMM per-expert (berapa token yang
+dirutekan ke tiap expert dalam satu ubatch) yang menabrak jalur cuBLAS bermasalah.
+
+**Mitigasi:** `-ub 256`. Dengan itu sweep 1–600 bersih dan HumanEval/68 jalan. Sekarang
+default di `stack.sh` (`UBATCH=256`, bisa di-override). Ini menghindari semua kasus yang
+bisa kami reproduksi, bukan jaminan — akar masalahnya belum diperbaiki di upstream.
+Kenapa ini tidak pernah muncul di benchmark 2026-09-03: prompt ~10.9K token diproses
+dalam ubatch 2048/512 penuh; hanya ubatch terakhir yang berukuran acak, dan tiga prompt
+tidak cukup untuk menabraknya. Coding agent yang mengirim ratusan prompt beragam **akan**
+menabraknya cepat atau lambat — 468 request eval menabraknya di request ke-369.
+
+Belum ditemukan issue upstream dengan signature ini (dicari 2026-09-04). Kandidat terdekat
+#27792 (OOB read di MMQ `mul_mat_id` untuk ubatch tertentu, MoE) — jalur kernel berbeda
+(MMQ vs cuBLAS) tapi gejalanya sama-sama bergantung ubatch `[Spekulasi]`.
+
+**Biaya `-ub 256`** (`runs/bench-stream2.jsonl`, label `llamacpp-mtp-ub256` vs `-ub512`,
+prompt ~10.9K token, median 2 run valid): TTFT **26.2 s vs 21.9 s** (+20% prefill),
+decode 36.7 vs 37.2 tok/s (setara). Prefill memang menjadi lebih mahal; itu harga
+stabilitas sampai upstream memperbaiki kernelnya. Catatan: run ke-4 (sumber
+`speculative.cpp`) gagal di kedua konfigurasi — server mengembalikan 1 token lalu stop.
+Prompt yang sama jalan normal di vLLM pada 2026-09-03. Belum diselidiki `[Belum Terverifikasi]`.
+
+---
+
+## 2026-09-04: Retensi akurasi — diukur, bukan dari model card
+
+Pertanyaan yang tersisa dari perbandingan backend: apakah NVFP4 (RadixArk) lebih buruk dari
+UD-Q4_K_XL (Unsloth)? BF16 360 GB tidak muat di GB10, jadi yang diukur adalah **kedua quant
+pada task set, harness, dan setting decoding yang identik**, lalu dibandingkan satu sama lain
+dan dengan angka BF16 yang dipublikasikan. Alat: `bench-accuracy.py`; data:
+`runs/accuracy-2026-09-04.jsonl`; sampel per soal di `tmp/accuracy/<label>/` (tidak di-track).
+
+Setting: thinking **off** (`chat_template_kwargs.enable_thinking=false`, kedua server
+menghormatinya — 27 prompt token identik), temperature 0, seed 1234. GSM8K: lm-eval
+`gsm8k_cot_zeroshot`, 300 soal test pertama, max 1024 token. HumanEval+: evalplus, 164 soal,
+greedy, max 2048 token (default 768 memotong dua jawaban yang menalar panjang dulu).
+
+| | llama.cpp UD-Q4_K_XL + MTP | vLLM NVFP4 (RadixArk) | BF16 published |
+|---|---|---|---|
+| GSM8K (300, final-paragraph) | **97.3%** (292) | **97.0%** (291) | 97.1–97.5 (RadixArk card, thinking on) |
+| GSM8K (300, lm-eval flexible-extract) | 86.3% | 85.3% | — |
+| HumanEval+ pass@1 base | 96.3% (158/164) | 97.0% (159/164) | — |
+| HumanEval+ pass@1 plus | **93.9%** (154/164) | **95.7%** (157/164) | — |
+
+stderr GSM8K ≈ 2.0 poin; HumanEval+ ≈ 1.9 poin. **Kesimpulan: kedua quant setara dalam
+batas noise.** Bukti yang lebih kuat dari angka agregatnya adalah *soal mana* yang gagal:
+
+- GSM8K: 7 soal gagal di keduanya; llama.cpp gagal 1 soal tambahan, vLLM 2. Sisa kegagalan
+  adalah batas model (mis. 36.36 vs 36, pembulatan), bukan efek quant.
+- HumanEval+: 7 soal gagal di keduanya; **set kegagalan vLLM adalah subset ketat** dari
+  llama.cpp, yang gagal 3 soal tambahan (38, 116, 124). Selisih 1.8 poin, di dalam stderr,
+  tapi arahnya konsisten: NVFP4 tidak lebih buruk, kalau ada malah sedikit lebih baik.
+
+Baris tabel perbandingan backend di atas ("belum terukur") sudah dikoreksi. Angka 92.3%
+Unsloth tidak sebanding dengan ini (metrik "top-1% accuracy" vs BF16, bukan task score).
+
+**Dua cacat harness yang ditemukan dan diperbaiki** (lanjutan daftar cacat 2026-09-03):
+
+4. lm-eval `flexible-extract` mengambil angka *terakhir* di respons. Model ini menutup dengan
+   "Kylar needs to pay **$64** for the 16 glasses" → terbaca 16. Juga `$26.00` ≠ `26`. Dari 48
+   "kegagalan" versi lm-eval, 37 adalah jawaban benar. Scorer `acc_final_para` (angka
+   terakhir di paragraf terakhir, angka tebal diutamakan) memperbaikinya tanpa satu pun
+   verdict benar berubah jadi salah. Kedua angka disimpan; baca yang final-paragraph.
+5. llama.cpp + MTP dengan 4 slot paralel: 96.3% vs 97.3% dengan 1 slot, dan satu respons
+   berhenti setelah 5 karakter ("Let $"). Cocok dengan gejala upstream #28286 (kontaminasi
+   antar slot dengan draft-mtp). Hasil resmi memakai 1 slot; vLLM boleh 4 paralel.
