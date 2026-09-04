@@ -89,6 +89,35 @@ and needs no second configuration.
 `API_KEY` is optional but recommended once the port leaves loopback; the server is
 unauthenticated without it.
 
+**If your laptop runs NVIDIA Sync instead of the Tailscale app**, `HOST=tailscale`
+will not work for that laptop. Sync bundles its own Tailscale node inside the
+application (it shows up in the tailnet as `nvsync-<machine>` with a `-dev` build
+number), and that node is private to Sync: the laptop's OS gets no `100.x`
+interface, so `ping 100.x.y.z` times out and no other program can reach the tailnet
+address. What Sync does provide is per-application port forwarding through that
+node — the same mechanism that puts the DGX Dashboard on `localhost:11000`. Use it
+for the model server too (verified 2026-09-04):
+
+1. In Sync, connect to the DGX, then **Settings → Custom → Add New**.
+2. Name it anything, set the port to `18080` (Sync binds local 18080 to remote 18080).
+3. Launch script:
+
+   ```bash
+   cd <path-to-this-repo> && API_KEY=<your-key> ./stack.sh start llamacpp
+   ```
+
+   Leave `HOST` unset. Sync's forward targets `127.0.0.1` on the DGX, so the default
+   loopback bind is exactly right — and the server never listens on WiFi or the
+   tailnet at all. `stack.sh start` returns once the server is up (~45 s) and leaves
+   it running in the background.
+4. On the laptop the base URL is `http://127.0.0.1:18080/v1`.
+
+Two simpler alternatives when both machines are on the same WiFi: bind to the DGX's
+LAN address directly (`HOST=192.168.x.y API_KEY=<key> ./stack.sh start llamacpp`;
+DHCP leases move, so reserve the address in the router), or install the real
+Tailscale app on the laptop alongside Sync — it becomes a second node and
+`HOST=tailscale` works as described above.
+
 For local benchmarking leave `HOST` unset — it defaults to `127.0.0.1`, which is
 what `bench-code.sh` and `bench.sh` expect.
 
@@ -126,7 +155,12 @@ pi
 
 `pi-models.json` ships with a placeholder host and reads the key from
 `QWEN38_API_KEY`, so neither your tailnet address nor the secret lives in the file.
-Find your own address on the DGX:
+Export the variable in the same shell you start `pi` from — `/model` re-reads the
+file, but not the environment.
+
+If you go through NVIDIA Sync's port forward instead (see *Reaching the server from
+another machine*), the base URL on the laptop is simply `http://127.0.0.1:18080/v1`
+and you can skip the address lookup below. Otherwise find your own address on the DGX:
 
 ```bash
 tailscale ip -4                                   # 100.x.y.z
@@ -144,8 +178,12 @@ you open `/model`, so edits apply without restarting.
 
 Notes:
 
-- `apiKey` is the dummy string `"local"` on purpose. Pi hides models that have no
-  auth configured, so a keyless local server still needs a placeholder.
+- `apiKey` is `"$QWEN38_API_KEY"`, which is Pi's syntax for reading an environment
+  variable (`$VAR`, `${VAR}`, or `!command`). An earlier revision of this file used
+  `{env:QWEN38_API_KEY}`; Pi does not know that form and sends the placeholder
+  literally, which the server answers with 401. If you run the server without
+  `API_KEY`, set the variable to any non-empty string anyway: Pi hides models that
+  have no key configured.
 - This is a **reasoning model**: it returns `reasoning_content` alongside `content`,
   which is why the config sets `"thinkingFormat": "deepseek"`. Give it a generous
   `maxTokens` — with a small budget the thinking consumes it all and `content` comes

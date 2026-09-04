@@ -3,7 +3,7 @@
     "qwen38-llamacpp": {
       "baseUrl": "http://YOUR-HOST.YOUR-TAILNET.ts.net:18080/v1",
       "api": "openai-completions",
-      "apiKey": "{env:QWEN38_API_KEY}",
+      "apiKey": "$QWEN38_API_KEY",
       "models": [
         {
           "id": "qwen3.8-flash-next",
@@ -29,7 +29,7 @@
     "qwen38-vllm": {
       "baseUrl": "http://YOUR-HOST.YOUR-TAILNET.ts.net:18300/v1",
       "api": "openai-completions",
-      "apiKey": "{env:QWEN38_API_KEY}",
+      "apiKey": "$QWEN38_API_KEY",
       "models": [
         {
           "id": "qwen3.8-flash-next",

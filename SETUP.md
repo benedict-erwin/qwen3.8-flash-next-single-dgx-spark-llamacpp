@@ -178,8 +178,19 @@ mkdir -p ~/.pi/agent
 cp pi-models.json ~/.pi/agent/models.json      # HATI-HATI: jangan timpa config yang sudah ada
 ```
 
-`apiKey` sengaja diisi `"local"`: Pi menyembunyikan model yang belum punya auth dari
-`/model`, jadi server keyless tetap butuh nilai dummy.
+`apiKey` diisi `"$QWEN38_API_KEY"` — sintaks Pi untuk membaca environment variable
+(`$VAR`, `${VAR}`, atau `!command`). Bentuk `{env:VAR}` yang dipakai revisi lama TIDAK
+dikenal Pi: placeholder-nya dikirim apa adanya dan server membalas 401. Export
+variabelnya di shell yang sama dengan tempat `pi` dijalankan. Kalau server jalan tanpa
+`API_KEY`, isi variabelnya sembarang string non-kosong: Pi menyembunyikan model yang
+belum punya key dari `/model`.
+
+Kalau laptop memakai NVIDIA Sync (bukan aplikasi Tailscale), `HOST=tailscale` tidak bisa
+dijangkau dari laptop itu — node Tailscale Sync tertanam di dalam aplikasi, OS laptop
+tidak punya interface `100.x`. Pakai port-forward Sync: Settings → Custom → Add New,
+port 18080, launch script `cd <repo> && API_KEY=<key> ./stack.sh start llamacpp`,
+`HOST` biarkan default; `baseUrl` di laptop jadi `http://127.0.0.1:18080/v1`. Detail di
+README "Reaching the server from another machine". Diverifikasi 2026-09-04.
 
 Setiap field disetel dari hasil probe ke server yang benar-benar jalan (2026-09-04),
 bukan dari dokumentasi:
