@@ -471,9 +471,10 @@ dalam ubatch 2048/512 penuh; hanya ubatch terakhir yang berukuran acak, dan tiga
 tidak cukup untuk menabraknya. Coding agent yang mengirim ratusan prompt beragam **akan**
 menabraknya cepat atau lambat — 468 request eval menabraknya di request ke-369.
 
-Belum ditemukan issue upstream dengan signature ini (dicari 2026-09-04). Kandidat terdekat
-#27792 (OOB read di MMQ `mul_mat_id` untuk ubatch tertentu, MoE) — jalur kernel berbeda
-(MMQ vs cuBLAS) tapi gejalanya sama-sama bergantung ubatch `[Spekulasi]`.
+Dilaporkan ke upstream sebagai **ggml-org/llama.cpp#28377** (2026-09-04) dengan reproduksi
+sweep di atas. Kandidat terkait: #28251 (call site sama, `cublasGemmEx` di jalur MoE, status
+cuBLAS berbeda, RTX 3070) dan #27792 (OOB read di MMQ `mul_mat_id`, jalur kernel berbeda
+tapi sama-sama bergantung ubatch) `[Spekulasi]`.
 
 **Biaya `-ub 256`** (`runs/bench-stream2.jsonl`, label `llamacpp-mtp-ub256` vs `-ub512`,
 prompt ~10.9K token, median 2 run valid): TTFT **26.2 s vs 21.9 s** (+20% prefill),

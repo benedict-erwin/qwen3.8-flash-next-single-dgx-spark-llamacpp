@@ -34,7 +34,8 @@ watchdog kernel panic on 2026-09-01.
 It also starts llama-server with `-ub 256`. The CUDA backend (Unsloth fork and
 upstream alike) aborts in `cublasGemmEx` on certain prefill batches — one HumanEval
 prompt reproduced it every time — and capping the physical batch at 256 avoided every
-case we could reproduce. Details and the sweep in `OPTIMIZATION.md`.
+case we could reproduce. Details and the sweep in `OPTIMIZATION.md`; reported upstream as
+ggml-org/llama.cpp#28377.
 
 ## Accuracy of the two quants
 
