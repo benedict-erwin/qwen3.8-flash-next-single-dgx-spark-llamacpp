@@ -199,6 +199,9 @@ Notes:
   your real prefix-cache hit rate — the number that decides whether llama.cpp or
   vLLM suits your usage. `./cache-ratio.py -v` computes the same thing server-side
   from `runs/serve-current.log` after a real session, so no client changes are needed.
+  First real measurement (two Pi coding sessions, 23 requests, context growing to 40k):
+  95.9% of prompt tokens served from cache, 2 of 23 calls cold, 33 tok/s aggregate
+  decode. Details in `OPTIMIZATION.md` (2026-09-05).
 
 ## Documents
 

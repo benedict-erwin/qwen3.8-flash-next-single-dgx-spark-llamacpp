@@ -431,6 +431,7 @@ selalu baru (>12% cold), misalnya memindai banyak file berbeda tiap panggilan. I
 diukur dari pola pemakaian nyata, bukan ditebak sekarang: `./cache-ratio.py -v` membaca
 `runs/serve-current.log` setelah sesi nyata dan melaporkan rasio cold call terhadap titik
 impas ini. Log benchmark sengaja 100% cold (prompt berbeda tiap run), jadi tidak mewakili.
+**Sudah diukur 2026-09-05** (bagian paling bawah): 8.7% cold, 95.9% token dari cache.
 
 ---
 
@@ -527,3 +528,47 @@ Unsloth tidak sebanding dengan ini (metrik "top-1% accuracy" vs BF16, bukan task
 5. llama.cpp + MTP dengan 4 slot paralel: 96.3% vs 97.3% dengan 1 slot, dan satu respons
    berhenti setelah 5 karakter ("Let $"). Cocok dengan gejala upstream #28286 (kontaminasi
    antar slot dengan draft-mtp). Hasil resmi memakai 1 slot; vLLM boleh 4 paralel.
+
+---
+
+## 2026-09-05: Rasio cache hit nyata — sesi coding agent pertama
+
+Angka yang sebelumnya kosong di bagian Rekomendasi. Sumber: `runs/cache-ratio-2026-09-05.jsonl`
+(23 request, direkonstruksi dari log llama-server oleh `cache-ratio.py`; kolom
+`draft_acceptance` ditambahkan dari baris `print_timing` yang sama). Beban: dua sesi Pi dari
+laptop lewat port-forward NVIDIA Sync — satu one-shot "mini spreadsheet" (satu file HTML,
+parser formula + dependency graph) lalu satu sesi follow-up (fix bug + fitur baru) di file yang
+sama. Model menulis kode, menjalankan test Node, memperbaiki test-nya sendiri; total 23 request,
+konteks tumbuh dari 1.6k ke 40k token.
+
+| | Nilai |
+|---|---|
+| Prompt tokens total / cached | 606 854 / 582 177 (**95.9%**) |
+| Cold call (cached < 50%) | **2 / 23 = 8.7%** — di bawah titik impas 12% |
+| Prefill wall total | 66.0 s, 2.87 s per call; **37.1 s** di antaranya satu call |
+| Prefill per call kalau call itu dikecualikan | ~1.3 s (22 call, 29 s) |
+| Completion tokens total / decode wall | 35 461 / 1076 s → **33.0 tok/s** agregat |
+| Decode per call | 26.6–38.5 tok/s; ≥30k konteks cenderung 27–30 |
+| Draft acceptance MTP agregat | 0.856 (20 670 / 24 145), per call 0.78–0.99 |
+
+**Kesimpulan:** pola pemakaian coding agent sungguhan jatuh di wilayah llama.cpp + MTP, seperti
+diasumsikan Rekomendasi. Sampel kecil (satu pengguna, dua sesi, satu jenis tugas), tapi arahnya
+jelas: 21 dari 23 call cache hit ≥ 82%, dan 17 di antaranya ≥ 98%.
+
+**Dua cold call itu bukan yang diduga.** Yang pertama adalah probe awal (wajar). Yang kedua,
+task 6875, adalah **turn kedua** sesi pertama: prompt 18 364 token, hanya 1 988 cached, 16 376
+token di-prefill ulang selama 37 s. Ukuran yang di-prefill ulang hampir persis sama dengan
+respons sebelumnya (16 342 token, 456 s decode — respons one-shot berisi thinking panjang plus
+seluruh file). `[Inferensi]` Isi respons itu dikirim balik oleh Pi sebagai history, tapi
+prefix cache tidak match: kandidat penyebab (a) token hasil generate ≠ hasil re-tokenize teks
+yang sama, sehingga satu token beda di awal menggugurkan semua setelahnya, atau (b) chat
+template me-render ulang blok thinking dengan format yang berbeda dari yang di-generate. Mana
+yang benar belum diuji; setelah turn itu, semua turn berikutnya hit ≥ 90%, jadi cache-nya
+bekerja normal — miss ini hanya terjadi sekali per percakapan, tepat setelah respons pertama.
+Kalau pola ini konsisten, biaya sesi = satu prefill sebesar respons pertama; untuk respons
+pendek biayanya kecil, untuk one-shot 16k token seperti ini 37 s.
+
+**Catatan decode:** 33 tok/s agregat vs 36.7 tok/s di benchmark. Selisihnya konsisten dengan
+konteks yang jauh lebih panjang (benchmark ~2k, sesi ini sampai 40k) dan acceptance MTP yang
+lebih rendah di kode yang belum pernah ada (0.78–0.89) dibanding saat menyalin ulang (0.99).
+Angka benchmark tidak salah; angka ini yang mewakili pemakaian nyata.
