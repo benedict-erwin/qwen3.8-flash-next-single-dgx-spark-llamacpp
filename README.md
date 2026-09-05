@@ -246,6 +246,14 @@ Notes:
   95.9% of prompt tokens served from cache, 2 of 23 calls cold, 33 tok/s aggregate
   decode. Details in `OPTIMIZATION.md` (2026-09-05).
 
+### Optional: the maintainer's Pi rules and settings
+
+[`pi/`](pi/) holds the global `AGENTS.md` and `settings.json` I use with this model:
+rules that keep a 131k context from filling up (read files with `grep`/`sed`, `tail` the
+logs), a session tracker for continuity across sessions, thinking level `medium` by
+default, and a larger compaction reserve. Personal preferences, not part of the recipe —
+copy what you like, ignore the rest. [`pi/README.md`](pi/README.md) explains each value.
+
 ## Documents
 
 | File | Contents |

@@ -1,0 +1,12 @@
+{
+  "defaultThinkingLevel": "medium",
+  "modelThinkingLevels": {
+    "qwen38-llamacpp/qwen3.8-flash-next": "medium"
+  },
+  "showCacheMissNotices": true,
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 24576,
+    "keepRecentTokens": 20000
+  }
+}
