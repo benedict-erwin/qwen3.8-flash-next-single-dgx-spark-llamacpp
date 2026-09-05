@@ -661,3 +661,78 @@ Catatan:
   video harus di-sample jadi frame oleh client. vLLM (repo Mia) menerima `video_url` langsung.
 - Keputusan: `stack.sh` menyalakan `--vision` otomatis kalau `models/mmproj/` ada (`VISION=0`
   mematikan). Biaya 1 GiB dinilai sepadan dengan kemampuan yang sebelumnya dianggap tidak ada.
+
+---
+
+## 2026-09-06: Beban banyak file — 7 bug marked dalam satu sesi Pi, dan akar cache miss ditemukan
+
+Uji "beban banyak file" yang ditunggu sejak 2026-09-05. Repo `markedjs/marked` (13 file source,
+410 file spec), snapshot tanpa git history dari commit `c6119b3c` dengan `test/` dari HEAD, sehingga
+**tujuh bug-fix** yang masuk upstream 4–5 September 2026 (jelas di luar data training) tercabut
+sekaligus. Satu prompt: perbaiki semua sampai `npm test` hijau, jangan sentuh `test/`, jangan pakai
+git history atau network. Rules `pi/AGENTS.md` aktif, thinking `medium`, server 131k + vision.
+Sumber angka: `runs/cache-ratio-2026-09-06-marked.jsonl` (94 request, dari log baris 807 ke atas).
+
+### Hasil model
+
+**7/7 bug diperbaiki, 1801 spec + 191 unit hijau, tidak ada file test disentuh, satu turn 31 menit**
+(thinking 28 menit di antaranya), 94 request, context tumbuh 2.6k → 70k token. Laporan akhir
+memakai format dan label rules (`[Inferensi]`, "Diverifikasi / Tidak diverifikasi") dalam Bahasa
+Indonesia — `AGENTS.md` dipatuhi sampai turn terakhir. Perbandingan dengan fix upstream:
+
+| Bug | Fix model vs upstream | Catatan |
+|---|---|---|
+| tag name HTML (#4083) | identik | dua rule (block + inline) sama persis |
+| fence indent (#4074) | identik | `Math.min(...)` sama |
+| code block kosong (#4073) | identik | tanpa komentar |
+| nested bracket (#4064) | ekuivalen | satu level nesting di-inline, upstream pakai sub-rule terpisah |
+| email autolink (#4063) | berbeda, valid | `(?![a-zA-Z0-9]*[-_])` vs `(?![\w-])`; analisis backtracking-nya benar |
+| ATX heading tab (#4084) | **lulus test, cacat laten** | model memperluas `endingSpaceChar` ke `/[ \t]$/`; upstream menambah rule baru karena `endingSpaceChar` juga dipakai code span (`Tokenizer.ts:848`), yang menurut CommonMark hanya boleh spasi. Tidak ada spec yang menangkap kombinasi spasi+tab |
+| character reference autolink (#4053) | berbeda desain | model meng-escape teks di **tokenizer** dan menambah regex `&` di renderer; upstream menyimpan token mentah dan escape di **renderer** via flag `autolink`. Lulus semua spec, tapi konsumen token custom akan menerima teks yang sudah di-escape — reviewer akan menolak |
+
+Kesimpulan kualitas: 5 fix setara upstream, 2 lulus test tapi kalah desain, satu di antaranya
+bug laten. Untuk model 4-bit lokal tanpa bantuan, ini level kontributor yang PR-nya perlu satu
+putaran review, bukan yang perlu ditulis ulang.
+
+### Cache dan kecepatan
+
+| | Nilai |
+|---|---|
+| Request / prompt tokens total | 94 / 3 123 134 |
+| Cached | **99.1%**; cold call **0/94** |
+| Prefill wall | 109 s total, 1.16 s per call; terlama 9.3 s (tool result 4.2k token) |
+| Completion tokens / decode | 45 900 tok / 1700 s → **27.0 tok/s** agregat pada context 30–70k |
+| Draft acceptance MTP | 0.861 |
+| Context akhir | 70 043 token, tanpa compaction (threshold 106k) |
+
+Decode 27 tok/s vs 33 di sesi spreadsheet (≤40k) vs 36.7 benchmark (~2k): penurunan konsisten
+dengan panjang context. Verdict cache-ratio: llama.cpp + MTP territory, dengan margin jauh.
+
+### Akar cache miss turn-2 (task 6875 kemarin) — TERJAWAB: token boundary drift
+
+Jebakan `LLAMA_SERVER_SLOTS_DEBUG` menangkap **2 mismatch nyata dari 93 request** dalam sesi
+(2.2%), plus 1 di awal sesi yang wajar (cwd di system prompt berubah `marked` → `marked-eval`).
+Keduanya pola yang sama: **teks identik, token id berbeda**.
+
+- task 6211: di dalam perintah tool call `sed -n '/^const atx/,/$/p' src/rules.ts | head -12`,
+  split di sekitar `/,` + ` /$/p'`. Rollback 225 token, 0.7 s.
+- task 14580: di dalam reasoning berisi regex, ``...or end. ` `` + `@` — cache punya token
+  `` ` `` lalu `@...`, prompt baru punya token `` `@ `` (ids `... 13151 75370 ...` vs
+  `... 74988 5431 ...`). Rollback ke checkpoint = **seluruh respons sebelumnya (2 597 token) +
+  tool result**, 2 667 token, 7.4 s.
+
+Jadi hipotesis (a) yang benar, bukan (b) template dan bukan (c) client: **token yang di-generate
+bukan tokenisasi kanonik dari teksnya**. Client (Pi) mengirim balik teks, server men-tokenize ulang
+secara kanonik, dan di posisi drift token id berbeda meski teksnya sama. Di model hybrid ini
+mismatch sekecil itu memundurkan ke checkpoint akhir prompt sebelumnya, jadi biayanya = panjang
+respons sebelumnya: 0.7 s untuk respons 200 token, 7 s untuk 2.6k, **37 s untuk respons one-shot
+16k token kemarin**. Frekuensinya ~2% request, cenderung pada teks padat tanda baca (regex, shell,
+backtick). Semua pengujian sintetis `cache-probe.py` HIT karena outputnya prosa dan kode biasa.
+
+`[Spekulasi]` Sumber drift kemungkinan MTP: draft head mengusulkan token, dan urutan yang diterima
+tidak harus sama dengan hasil tokenizer atas teks yang sama. Ujinya: sesi serupa dengan
+`--spec-type` dimatikan dan hitung mismatch — belum dijalankan karena decode tanpa MTP jauh lebih
+lambat. Mitigasi yang tersedia sekarang: tidak ada yang murah; biayanya terikat ke panjang respons
+sebelumnya, jadi thinking `medium` (respons lebih pendek) sekaligus memperkecil biaya miss.
+Perbaikan sesungguhnya ada di server: membandingkan cache berdasarkan teks, bukan token id, atau
+checkpoint periodik selama generate. Layak dilaporkan ke upstream dengan dump di atas.
