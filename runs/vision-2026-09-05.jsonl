@@ -1,0 +1,4 @@
+{"date": "2026-09-05", "test": "bands.png 336x336 three colour stripes", "prompt_tokens": 196, "completion_tokens": 318, "prefill_ms": 1392.06, "decode_tok_s": 42.59, "draft_acceptance": 0.97653, "wall_s": 8.9, "answer": "red, green, blue top to bottom", "correct": true}
+{"date": "2026-09-05", "test": "seven.png 336x336 black digit 7 on white", "prompt_tokens": 190, "completion_tokens": 51, "prefill_ms": 749.36, "decode_tok_s": 41.54, "draft_acceptance": 0.97059, "wall_s": 2.1, "answer": "7", "correct": true}
+{"date": "2026-09-05", "test": "text-only control, same server", "prompt_tokens": 58, "completion_tokens": 87, "prefill_ms": 263.35, "decode_tok_s": 31.5, "draft_acceptance": 0.90909, "wall_s": 3.1, "answer": "Hi there friend", "correct": true}
+{"date": "2026-09-05", "test": "memory", "mem_available_gib_text_only": 29, "mem_available_gib_with_vision": 27.9, "mmproj_bytes": 907542944}

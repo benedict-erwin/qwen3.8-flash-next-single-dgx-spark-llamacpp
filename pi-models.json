@@ -10,7 +10,8 @@
           "name": "Qwen3.8-Flash-Next (llama.cpp fork + MTP, GB10)",
           "reasoning": true,
           "input": [
-            "text"
+            "text",
+            "image"
           ],
           "contextWindow": 131072,
           "maxTokens": 32768,

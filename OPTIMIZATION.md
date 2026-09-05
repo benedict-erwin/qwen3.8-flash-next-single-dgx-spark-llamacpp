@@ -626,3 +626,38 @@ percakapan, bukan hanya pola tugas.
 konteks yang jauh lebih panjang (benchmark ~2k, sesi ini sampai 40k) dan acceptance MTP yang
 lebih rendah di kode yang belum pernah ada (0.78–0.89) dibanding saat menyalin ulang (0.99).
 Angka benchmark tidak salah; angka ini yang mewakili pemakaian nyata.
+
+---
+
+## 2026-09-05: Vision (mmproj) di jalur llama.cpp — jalan, MTP tidak terganggu
+
+Model ini VLM (vision tower 27 layer, projector `qwen3vl_merger`, `image_size` 768,
+`patch_size` 16). Unsloth menyertakan `mmproj-BF16.gguf` (907 542 944 byte) di repo GGUF yang
+sama; recipe ini sebelumnya hanya mengambil shard teks + MTP head. Fork b10715 membawa
+`libmtmd`, jadi cukup `--mmproj` di `serve.sh` (`--vision`) — tidak ada build ulang.
+
+Uji 2026-09-05 (`runs/vision-2026-09-05.jsonl`; server `--mtp --nmax 3 -ub 256 --vision`):
+
+| Request | prompt tok | prefill | completion | decode | acceptance MTP | hasil |
+|---|---|---|---|---|---|---|
+| PNG 336² tiga pita warna, "warna apa, urut atas-bawah?" | 196 | 1.39 s | 318 | 42.6 tok/s | 0.977 | benar: red, green, blue |
+| PNG 336² angka 7 hitam di putih, "karakter apa?" | 190 | 0.75 s | 51 | 41.5 tok/s | 0.971 | benar: 7 |
+| kontrol teks saja, server yang sama | 58 | 0.26 s | 87 | 31.5 tok/s | 0.909 | benar |
+
+Catatan:
+- **MTP tetap aktif pada request bergambar** — kontras dengan vLLM (repo Mia): draft model di sana
+  tidak menerima embedding multimodal dan fallback ke decode non-spekulatif. Di llama.cpp draft
+  MTP hanya melihat token teks setelah blok gambar, dan acceptance-nya justru tinggi (0.97) karena
+  jawaban deskriptif itu predictable.
+- Memori: `MemAvailable` 29 → 27.9 GiB, sekitar 1 GiB (bobot projector 0.85 GiB + buffer encode).
+- Gambar kecil ≈ 140 token prompt. llama.cpp memperingatkan: "Qwen-VL models require at minimum
+  1024 image tokens to function correctly on grounding tasks; try `--image-min-tokens 1024`".
+  Tidak dijadikan default karena menaikkan prefill per gambar; relevan hanya untuk bounding box /
+  lokalisasi presisi. `[Belum Terverifikasi]` akurasi grounding pada setting default.
+- Dump `LLAMA_SERVER_SLOTS_DEBUG` ikut menampilkan `<|vision_start|> | [mtmd]...` saat dua request
+  bergambar berbeda mendarat di slot yang sama — itu mismatch yang wajar (gambar berbeda), bukan
+  anomali cache.
+- Hanya gambar. Model card: image + video, tanpa audio. mtmd llama-server menerima still image;
+  video harus di-sample jadi frame oleh client. vLLM (repo Mia) menerima `video_url` langsung.
+- Keputusan: `stack.sh` menyalakan `--vision` otomatis kalau `models/mmproj/` ada (`VISION=0`
+  mematikan). Biaya 1 GiB dinilai sepadan dengan kemampuan yang sebelumnya dianggap tidak ada.

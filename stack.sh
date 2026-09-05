@@ -2,6 +2,7 @@
 # Start/stop either inference stack for Qwen3.8-Flash-Next, one at a time.
 #
 #   ./stack.sh start llamacpp   # fork Unsloth + MTP, port 18080  (recommended)
+#   VISION=0 ./stack.sh start llamacpp   # text-only; by default images work once ./download-mmproj.sh ran
 #   ./stack.sh start vllm       # vLLM NVFP4 container, port 18300
 #   ./stack.sh stop
 #   ./stack.sh status
@@ -84,7 +85,10 @@ start)
     # sizes (367 and 512 seen in a 300-600 sweep; upstream is affected too).
     # Capping the physical batch at 256 avoided every size in 1-600. See
     # OPTIMIZATION.md "Crash CUDA pada ukuran batch tertentu".
-    UBATCH="${UBATCH:-256}" BUILD=fork nohup ./serve.sh --mtp --nmax 3 > runs/serve-current.log 2>&1 &
+    # Vision projector: on whenever models/mmproj is present (./download-mmproj.sh),
+    # VISION=0 forces text-only. Costs ~1 GiB; MTP is unaffected (OPTIMIZATION.md 2026-09-05).
+    VIS=(); [ "${VISION:-auto}" != 0 ] && [ -f models/mmproj/mmproj-BF16.gguf ] && VIS=(--vision)
+    UBATCH="${UBATCH:-256}" BUILD=fork nohup ./serve.sh --mtp --nmax 3 "${VIS[@]}" > runs/serve-current.log 2>&1 &
     if wait_ready "$LC_PORT" 300; then
       echo ">> READY  http://$HOST:$LC_PORT/v1  (used $(used_gib) GiB, available $(avail) GiB)"
     else

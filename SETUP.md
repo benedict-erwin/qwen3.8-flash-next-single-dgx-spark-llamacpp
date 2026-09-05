@@ -32,6 +32,10 @@ Ini stack yang menang di benchmark: decode 37.8 tok/s, RAM 88 GiB, start 45 deti
 # 3. Binary fork Unsloth, 223 MB -- WAJIB untuk MTP
 ./download-fork.sh
 
+# 3b. (opsional) vision projector, 0.85 GiB -- request bergambar (image_url) jalan.
+#     stack.sh memuatnya otomatis kalau file ada; VISION=0 untuk text-only.
+./download-mmproj.sh
+
 # 4. Jalankan
 ./stack.sh start llamacpp        # port 18080, API OpenAI-compatible
 ./stack.sh status

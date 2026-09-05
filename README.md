@@ -37,6 +37,30 @@ prompt reproduced it every time — and capping the physical batch at 256 avoide
 case we could reproduce. Details and the sweep in `OPTIMIZATION.md`; reported upstream as
 ggml-org/llama.cpp#28377.
 
+## Images
+
+The model is a vision-language model and the llama.cpp path serves images too: the
+0.85 GiB vision projector (`mmproj-BF16.gguf`, 27-layer tower, `qwen3vl_merger`) loads
+next to the text weights. `./download-mmproj.sh` fetches it, and `stack.sh` enables it
+automatically whenever the file is present (`VISION=0` for text-only). Send images the
+OpenAI way, as `image_url` parts with an `http(s)://` URL or a `data:` URI.
+
+Measured 2026-09-05 (`runs/vision-2026-09-05.jsonl`), 336x336 PNGs:
+
+| | |
+|---|---|
+| Three colour stripes, "which colours, top to bottom?" | correct; 196 prompt tokens, 8.9 s wall incl. 318 tokens of reasoning + answer |
+| A drawn digit, "which character?" | correct; 190 prompt tokens, 2.1 s wall |
+| MTP on image requests | still active, draft acceptance 0.97, decode 42 tok/s |
+| Extra memory | ~1 GiB (`MemAvailable` 29 → 27.9 GiB) |
+
+Two notes. A small image costs ~140 prompt tokens; llama.cpp warns that Qwen-VL grounding
+tasks (bounding boxes, precise localisation) want at least 1024 image tokens — add
+`--image-min-tokens 1024` to `serve.sh` if you do that kind of work, at the price of a
+longer prefill per image. And this is images only: the model card lists image and video,
+not audio, and llama-server's multimodal layer takes still images, so video means
+sampling frames yourself. Pi gets `"input": ["text", "image"]` in `pi-models.json`.
+
 ## Accuracy of the two quants
 
 Measured on this machine, same harness and decoding settings on both backends, thinking
@@ -236,9 +260,10 @@ Notes:
 | Script | Purpose |
 |---|---|
 | `stack.sh` | start / stop / status for either backend, with a memory preflight |
-| `serve.sh` | launches llama-server directly (`--mtp`, `--ngram-mod`, `--mmap`, `CTX=`, `BUILD=`, `UBATCH=`) |
+| `serve.sh` | launches llama-server directly (`--mtp`, `--vision`, `--ngram-mod`, `--mmap`, `CTX=`, `BUILD=`, `UBATCH=`) |
 | `download-parts.sh` | main GGUF, 104 GiB |
 | `download-mtp.sh` | MTP draft head, 3.85 GiB |
+| `download-mmproj.sh` | vision projector, 0.85 GiB — enables images |
 | `download-fork.sh` | Unsloth llama.cpp prebuilt — required for MTP |
 | `bench-code.sh` | coding-shaped benchmark against llama.cpp |
 | `bench-stream.py` | streaming benchmark; the only one valid for comparing across backends |

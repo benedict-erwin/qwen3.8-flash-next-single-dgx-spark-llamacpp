@@ -3,10 +3,12 @@
 # Default = the measured baseline (21.8 tok/s on 2026-09-01): GPU experts,
 # PLE n-gram table pinned to CPU, KV cache q8_0, no speculative decoding.
 #
-# Usage: ./serve.sh [--ngram-mod] [--mtp] [--mmap] [--nmax N]
+# Usage: ./serve.sh [--ngram-mod] [--mtp] [--mmap] [--vision] [--nmax N]
 #   --ngram-mod  n-gram speculative decoding (free, no extra model)
 #   --mtp        MTP draft head sidecar   (needs ./download-mtp.sh first)
 #   --mmap       PLE served from page cache instead of resident (~26.8 GiB less RSS)
+#   --vision     load the vision projector so /v1/chat/completions accepts image_url
+#                (needs ./download-mmproj.sh first)
 #   --nmax N     max draft tokens per step (default 2)
 #   BUILD=build  use the old 5d4a3be binary instead of build-new
 set -euo pipefail
@@ -29,6 +31,7 @@ else
 fi
 MODEL=models/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf
 MTP=models/MTP/mtp-Qwen3.8-Flash-Next-Q8_0.gguf
+MMPROJ=models/mmproj/mmproj-BF16.gguf
 PORT=18080
 NMAX=2
 # Bind address. Default stays loopback so local benchmarking is unchanged.
@@ -58,12 +61,14 @@ UBATCH="${UBATCH:-}"
 EXTRA=()
 LABEL="baseline"
 USE_MMAP=0
+VISION=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --ngram-mod) EXTRA+=(--spec-type ngram-mod); LABEL="ngram-mod" ;;
     --mtp)       EXTRA+=(--spec-type draft-mtp -md "$MTP" -ngld 999 --spec-draft-p-min 0.75); LABEL="mtp" ;;
     --mmap)      USE_MMAP=1 ;;
+    --vision)    VISION=1 ;;
     --nmax)      shift; NMAX="$1" ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -82,8 +87,14 @@ LOADMODE=(-lm mmap); (( USE_MMAP )) || LOADMODE=()
 if [[ " ${EXTRA[*]} " == *draft-mtp* && ! -f "$MTP" ]]; then
   echo "missing MTP head: $MTP -- run ./download-mtp.sh" >&2; exit 1
 fi
+# The vision projector is a separate 0.85 GiB gguf; without --vision the server
+# stays text-only and image_url parts are rejected, exactly as before.
+if (( VISION )); then
+  [[ -f "$MMPROJ" ]] || { echo "missing vision projector: $MMPROJ -- run ./download-mmproj.sh" >&2; exit 1; }
+  EXTRA+=(--mmproj "$MMPROJ")
+fi
 
-echo "[serve] build=$BUILD config=$LABEL mmap=$USE_MMAP nmax=$NMAX ctx=$CTX alias=$ALIAS host=$HOST:$PORT auth=$([ -n "$API_KEY" ] && echo yes || echo no)"
+echo "[serve] build=$BUILD config=$LABEL mmap=$USE_MMAP vision=$VISION nmax=$NMAX ctx=$CTX alias=$ALIAS host=$HOST:$PORT auth=$([ -n "$API_KEY" ] && echo yes || echo no)"
 exec "$BIN" \
   -m "$MODEL" \
   -ngl 999 \
