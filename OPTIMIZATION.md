@@ -736,3 +736,28 @@ lambat. Mitigasi yang tersedia sekarang: tidak ada yang murah; biayanya terikat 
 sebelumnya, jadi thinking `medium` (respons lebih pendek) sekaligus memperkecil biaya miss.
 Perbaikan sesungguhnya ada di server: membandingkan cache berdasarkan teks, bukan token id, atau
 checkpoint periodik selama generate. Layak dilaporkan ke upstream dengan dump di atas.
+
+---
+
+## 2026-09-06: Ide dari repo Mia — reduced-vocabulary drafting (belum bisa di llama.cpp)
+
+Repo MiaAI-Lab (vLLM) menaikkan decode single-stream 36.9 → 46.3 tok/s (+25%) dengan satu
+perubahan: draft head MTP hanya menghitung argmax atas 65 536 token paling sering dipakai, bukan
+seluruh vocab 248 320 (gaya FR-Spec, `files/patch_mtp_draft_vocab.py`). Alasannya: `lm_head`
+drafter dibaca sekali per draft step, tiga kali per engine step pada MTP 3, dan decode sudah di
+tembok bandwidth, jadi byte yang hilang berubah jadi waktu hampir satu-satu. Akurasi output tidak
+berubah karena target memverifikasi tiap draft; draft yang salah hanya menurunkan acceptance
+(MGSM 250 soal per bahasa: EN 94.8% vs 93.6%, ZH 86.4% vs 86.4%, angka mereka, single-run).
+
+Relevansi untuk recipe ini `[Inferensi]`: jalur `draft-mtp` llama.cpp juga menghitung logits penuh
+atas 248 320 token untuk tiap draft token. `[estimate]` head Q8_0 = 248 320 × 2 560 ≈ 0.67 GB per
+draft, ~2 GB per step pada `--nmax 3`, dibanding ~6.35 GB per token target dari roofline (273 GB/s
+÷ 43 tok/s) — sekitar seperempat byte per step. Kalau bisa dipangkas seperti di vLLM, decode
+berpotensi ke kisaran 45 tok/s. **Tidak ada flag llama-server untuk ini**; butuh perubahan kode di
+jalur speculative (argmax draft atas subset vocab). Dicatat sebagai ide, bukan rencana: tidak ada
+yang bisa diubah di recipe hari ini, dan kontribusi upstream dariku tidak mungkin (lihat
+kebijakan AI llama.cpp). Kalau suatu saat upstream menambahkannya, itu satu flag yang layak diuji
+pertama.
+
+Dua hal lain dari update mereka yang tidak berlaku di sini: prefetch page-fault PLE (`posix_fadvise`)
+— PLE kita resident, bukan mmap; dan `CUDAGRAPH_CAPTURE_SIZES=auto` — spesifik vLLM.

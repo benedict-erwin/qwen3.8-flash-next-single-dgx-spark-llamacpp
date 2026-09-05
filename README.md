@@ -16,6 +16,31 @@ in [`OPTIMIZATION.md`](OPTIMIZATION.md).
 vLLM is 1.44x faster only on cold prompts; llama.cpp wins on cache hits and costs
 24 GiB less. Break-even is 12% cold calls.
 
+### The shipped profile, measured
+
+What `./stack.sh start llamacpp` runs today, and what it measured on this machine. Every
+number links to the file it came from; none is typed from memory.
+
+| | Value | Source |
+|---|---|---|
+| Config | Unsloth fork `b10715`, UD-Q4_K_XL, MTP head Q8_0 `--nmax 3`, KV q8_0, context 131k, `-ub 256`, vision projector | `stack.sh`, `serve.sh` |
+| TTFT, 10.9k-token prompt | 26.2 s cold, 1.8 s on a prefix-cache hit | `runs/bench-stream2.jsonl` |
+| Decode, benchmark | 36.7 tok/s (median of 2, `-ub 256`) | `runs/bench-stream2.jsonl` |
+| Decode, real coding sessions | 33.0 tok/s at ≤40k context; 27.0 tok/s at 30–70k | `runs/cache-ratio-2026-09-05.jsonl`, `runs/cache-ratio-2026-09-06-marked.jsonl` |
+| Prefix-cache hit, real sessions | 95.9% (23 requests); 99.1%, 0 cold (94 requests) | same two files |
+| MTP draft acceptance, real sessions | 0.86 | same two files |
+| Accuracy, thinking off, greedy | GSM8K 97.3%, HumanEval+ 93.9% | `runs/accuracy-2026-09-04.jsonl` |
+| Images | two test images answered correctly; MTP stays active, 42 tok/s | `runs/vision-2026-09-05.jsonl` |
+| Memory | 88 GiB resident + ~1 GiB for vision, ~28 GiB left | `stack.sh status` |
+| Start to ready | ~45 s | `stack.sh` |
+
+The cold TTFT is 4 s worse than the 21.6 s in the table above: that is the price of
+`-ub 256`, the workaround for the cuBLAS crash described below. Cached TTFT and decode are
+unchanged by it. One known cost not in the table: about 2% of requests miss the prefix
+cache because the generated tokens are not the canonical tokenisation of their text, and
+on this hybrid model such a miss re-prefills the whole previous response — 7 s after a
+2.6k-token answer, 37 s after a 16k one (`OPTIMIZATION.md`, 2026-09-06).
+
 ## Quick start
 
 First-time setup (downloads ~110 GB) is in [`SETUP.md`](SETUP.md). Once that is done:
