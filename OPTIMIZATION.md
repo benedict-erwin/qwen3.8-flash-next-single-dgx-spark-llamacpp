@@ -761,3 +761,50 @@ pertama.
 
 Dua hal lain dari update mereka yang tidak berlaku di sini: prefetch page-fault PLE (`posix_fadvise`)
 — PLE kita resident, bukan mmap; dan `CUDAGRAPH_CAPTURE_SIZES=auto` — spesifik vLLM.
+
+---
+
+## 2026-09-06: Opsi A — sweep flag speculative: `--spec-draft-p-min 0.50` +10% decode
+
+Satu-satunya knob speculative yang belum pernah disapu. `serve.sh` kini menerima `--pmin` (default
+0.75, nilai yang sebelumnya hardcoded) dan `stack.sh` meneruskan `NMAX`/`PMIN` dari env. Semua angka
+dari `runs/bench-stream2.jsonl`, label `sweepA-*` dan `sweepA2-*`, server restart per konfigurasi
+(cache kosong), 3 request per start, warm-up dibuang.
+
+**Putaran 1, lima konfigurasi, 2 run valid masing-masing:**
+
+| nmax / p-min | decode median | vs baseline |
+|---|---|---|
+| 3 / 0.75 (baseline hari ini) | 38.1 tok/s | — |
+| 4 / 0.75 | 39.1 | +2.5%, noise |
+| **3 / 0.50** | **41.7** | **+9.4%** |
+| 2 / 0.75 | 36.8 | −3.4%, noise |
+| 3 / 0.90 | 33.8 | tidak sah — prompt yang gagal berbeda dari baseline |
+
+**Putaran 2, A/B bergantian 3 restart per sisi** (label `sweepA2-*`):
+
+| | p-min 0.75 | p-min 0.50 |
+|---|---|---|
+| run valid | 5 | 4 |
+| prompt `llama-kv-cache.cpp`, 3 restart | 34.0 / 36.0 / 35.0 → **35.0** | 39.0 / 39.1 / 38.1 → **38.8** (+10.7%) |
+| prompt `arg.cpp` | 41.5 / 41.2 | 46.2 (+11.7%, 1 run) |
+| TTFT median | 28.25 s | 28.25 s |
+| draft acceptance | 0.931 | 0.840 |
+| mean accepted length | 3.21 | 3.30 |
+
+Mekanismenya koheren: p-min lebih rendah membuat drafter mengajukan token lebih banyak per step
+(mendekati `nmax` 3 setiap kali), lebih banyak yang ditolak (acceptance turun), tapi jumlah token
+diterima per step justru naik (3.21 → 3.30) dan itu yang menentukan tok/s. Kualitas output tidak
+tersentuh: target memverifikasi tiap draft, jadi p-min hanya mengatur biaya, bukan hasil. Pada
+prompt yang sama, tiga restart berturut-turut, rentangnya tidak tumpang tindih (34.0–36.0 vs
+38.1–39.1). `nmax` 4 tidak membantu; sisa gain dari p-min 0.50 sekitar +10%, bukan +25% seperti
+reduced-vocab drafting di vLLM.
+
+**Anomali "prompt `speculative.cpp` → 1 token" TERJAWAB (item lama di tracker).** Di semua 11 start
+sweep ini, request pertama (warm-up, prompt `speculative.cpp`, 10 892 token) berakhir setelah 1 token,
+dan run ke-3 (prompt yang sama, cache RAM mengembalikan state → hanya 4 token di-prefill) juga
+1 token. Prompt `arg.cpp` mengalami hal yang sama secara intermiten (3 dari 6 start). `bench-stream.py`
+memakai `/v1/completions` mentah tanpa chat template, dan pada prompt-prompt itu model langsung
+mengeluarkan token akhir. Ini artefak harness, bukan bug server, dan tidak bergantung pada parameter
+speculative. Konsekuensinya: tiap start hanya menghasilkan 1–2 run valid dari 3. Cacat harness #6
+untuk diperbaiki kalau benchmark ini dipakai lagi: pakai chat completions atau tambah prompt.

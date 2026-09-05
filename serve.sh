@@ -10,6 +10,7 @@
 #   --vision     load the vision projector so /v1/chat/completions accepts image_url
 #                (needs ./download-mmproj.sh first)
 #   --nmax N     max draft tokens per step (default 2)
+#   --pmin P     min draft probability to keep a draft token (default 0.75; --mtp only)
 #   BUILD=build  use the old 5d4a3be binary instead of build-new
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -34,6 +35,7 @@ MTP=models/MTP/mtp-Qwen3.8-Flash-Next-Q8_0.gguf
 MMPROJ=models/mmproj/mmproj-BF16.gguf
 PORT=18080
 NMAX=2
+PMIN=0.75
 # Bind address. Default stays loopback so local benchmarking is unchanged.
 #   HOST=tailscale  -> bind to this node's tailnet IP only: reachable from every
 #                      device on the tailnet (and directly over LAN when they are
@@ -66,17 +68,19 @@ VISION=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --ngram-mod) EXTRA+=(--spec-type ngram-mod); LABEL="ngram-mod" ;;
-    --mtp)       EXTRA+=(--spec-type draft-mtp -md "$MTP" -ngld 999 --spec-draft-p-min 0.75); LABEL="mtp" ;;
+    --mtp)       EXTRA+=(--spec-type draft-mtp -md "$MTP" -ngld 999); LABEL="mtp" ;;
     --mmap)      USE_MMAP=1 ;;
     --vision)    VISION=1 ;;
     --nmax)      shift; NMAX="$1" ;;
+    --pmin)      shift; PMIN="$1" ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
 done
 
-# --spec-draft-n-max only means anything once a spec type is active.
+# --spec-draft-n-max only means anything once a spec type is active; p-min only for MTP.
 [[ ${#EXTRA[@]} -gt 0 ]] && EXTRA+=(--spec-draft-n-max "$NMAX")
+[[ " ${EXTRA[*]} " == *draft-mtp* ]] && EXTRA+=(--spec-draft-p-min "$PMIN")
 
 # mmap keeps the 26.82 GiB PLE table in reclaimable page cache rather than
 # resident, so memory pressure degrades to "slow" instead of the NVRM stall ->
@@ -94,7 +98,7 @@ if (( VISION )); then
   EXTRA+=(--mmproj "$MMPROJ")
 fi
 
-echo "[serve] build=$BUILD config=$LABEL mmap=$USE_MMAP vision=$VISION nmax=$NMAX ctx=$CTX alias=$ALIAS host=$HOST:$PORT auth=$([ -n "$API_KEY" ] && echo yes || echo no)"
+echo "[serve] build=$BUILD config=$LABEL mmap=$USE_MMAP vision=$VISION nmax=$NMAX pmin=$PMIN ctx=$CTX alias=$ALIAS host=$HOST:$PORT auth=$([ -n "$API_KEY" ] && echo yes || echo no)"
 exec "$BIN" \
   -m "$MODEL" \
   -ngl 999 \
