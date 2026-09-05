@@ -568,6 +568,23 @@ bekerja normal — miss ini hanya terjadi sekali per percakapan, tepat setelah r
 Kalau pola ini konsisten, biaya sesi = satu prefill sebesar respons pertama; untuk respons
 pendek biayanya kecil, untuk one-shot 16k token seperti ini 37 s.
 
+**Dipersempit hari yang sama dengan `cache-probe.py`** (percakapan dua turn sintetis lewat API,
+`usage.prompt_tokens_details.cached_tokens` dibaca langsung, `max_tokens=1` untuk turn 2):
+
+| Cara mengirim balik turn assistant | prompt | cached | hit |
+|---|---|---|---|
+| turn 1 dikirim ulang persis (sanity) | 100 | 96 | 96.0% |
+| `content` saja, thinking dibuang | 328 | 96 | **29.3%** |
+| `content` + `reasoning_content` | 501 | 477 | **95.2%** |
+
+Dan token demi token, history yang di-render ulang dengan `reasoning_content` **identik** dengan
+478 token jalur generate (prompt + output). Jadi hipotesis (a) dan (b) gugur: sisi server
+cache-friendly asal client mengirim balik `reasoning_content`. Pola "cached = panjang prompt
+turn 1" di task 6875 persis sama dengan baris "thinking dibuang". `[Inferensi]` Pi tidak
+mengirim balik reasoning dalam bentuk yang dikenali template — dibuang, atau dikirim di field
+lain (mis. `reasoning` alih-alih `reasoning_content`). Belum dikonfirmasi dari traffic Pi;
+langkah ujinya ada di tracker.
+
 **Catatan decode:** 33 tok/s agregat vs 36.7 tok/s di benchmark. Selisihnya konsisten dengan
 konteks yang jauh lebih panjang (benchmark ~2k, sesi ini sampai 40k) dan acceptance MTP yang
 lebih rendah di kode yang belum pernah ada (0.78–0.89) dibanding saat menyalin ulang (0.99).
