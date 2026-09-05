@@ -111,9 +111,21 @@ for the model server too (verified 2026-09-04):
    tailnet at all. `stack.sh start` returns once the server is up (~45 s) and leaves
    it running in the background.
 
-   Recommended: prefix the command with `LLAMA_SERVER_SLOTS_DEBUG=1 LLAMA_SERVER_SLOTS_N_DIFF=12`.
-   It costs nothing while the prefix cache hits, and when a turn misses the cache the
-   server logs the tokens around the mismatch (`old: ... | ...` / `new: ... | ...` in
+   Alternatively, keep the model server out of Sync's hands: start it yourself over
+   SSH and give the Custom Application a launch script that only reports status, so a
+   Sync reconnect never triggers a start (`stack.sh` refuses to start twice, but the
+   entry would still show a failed script):
+
+   ```bash
+   # on the DGX, once
+   LLAMA_SERVER_SLOTS_DEBUG=1 LLAMA_SERVER_SLOTS_N_DIFF=12 API_KEY=<your-key> ./stack.sh start llamacpp
+   # Sync launch script
+   cd <path-to-this-repo> && ./stack.sh status
+   ```
+
+   The two `LLAMA_SERVER_SLOTS_*` variables are recommended either way. They cost
+   nothing while the prefix cache hits, and when a turn misses the cache the server
+   logs the tokens around the mismatch (`old: ... | ...` / `new: ... | ...` in
    `runs/serve-current.log`). On this hybrid model a miss anywhere in a turn re-prefills
    the whole previous response, so that one line is the evidence you want when a
    follow-up turn suddenly takes 30 s (see `OPTIMIZATION.md`, 2026-09-05).
