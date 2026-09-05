@@ -24,6 +24,27 @@ Why these values, all from measurements in `../OPTIMIZATION.md`:
 - **Session tracker** (`.agent/SESSION_TRACKER.md`): compaction keeps context inside one
   session; the tracker carries state between sessions. The model asks before creating it.
 
+## Optional tweaks I use for longer sessions
+
+None of these change the recipe's defaults; each is one setting on your side.
+
+- **Run the server at the model's native 262k.** `CTX=262144 ./stack.sh start llamacpp`
+  costs about 6 GiB more KV (q8_0: ~12.8 GiB instead of ~6.4 GiB) and doubles the room
+  before compaction. Then set `contextWindow` to `262144` for the llama.cpp provider in
+  `~/.pi/agent/models.json`, otherwise Pi compacts at ~106k while the server could hold
+  more. The two numbers must move together.
+- **Lower the thinking level for routine work.** `/thinking` inside a session; `medium`
+  is the default in `settings.json` here, `low` for small edits, `high` for design or a
+  hard bug. Thinking tokens are resent as history on every following turn.
+- **One session per task, `/compact` at milestones.** Start a fresh session per feature or
+  bug; the tracker carries the state over. When a task is long, run `/compact keep the
+  changed-files list and the remaining TODO` right after tests go green — you choose the
+  moment, not the token counter. On this model a compaction is a full re-prefill (~1 min).
+- **Sub-agents for exploration.** Packages such as `pi-subagents` run a child agent with
+  its own context; searching a large codebase there keeps only the conclusion in the main
+  session. Each child is a cold prefill and decodes at ~33 tok/s, so use it for breadth,
+  not for every lookup.
+
 The language rule (talk in Bahasa Indonesia) is a personal preference — change the first
 bullet. Pi loads `AGENTS.md` from `~/.pi/agent/`, every parent directory of the cwd, and
 the cwd, and concatenates them; project-specific rules belong in the project's own file.
