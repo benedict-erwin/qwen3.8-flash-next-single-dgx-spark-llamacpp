@@ -110,6 +110,13 @@ for the model server too (verified 2026-09-04):
    loopback bind is exactly right — and the server never listens on WiFi or the
    tailnet at all. `stack.sh start` returns once the server is up (~45 s) and leaves
    it running in the background.
+
+   Recommended: prefix the command with `LLAMA_SERVER_SLOTS_DEBUG=1 LLAMA_SERVER_SLOTS_N_DIFF=12`.
+   It costs nothing while the prefix cache hits, and when a turn misses the cache the
+   server logs the tokens around the mismatch (`old: ... | ...` / `new: ... | ...` in
+   `runs/serve-current.log`). On this hybrid model a miss anywhere in a turn re-prefills
+   the whole previous response, so that one line is the evidence you want when a
+   follow-up turn suddenly takes 30 s (see `OPTIMIZATION.md`, 2026-09-05).
 4. **Click the new entry** in the Custom list. Adding it only saves the definition;
    the forward is not active until the entry is clicked and its status dot turns
    green. Until then `127.0.0.1:18080` on the laptop refuses connections even though
