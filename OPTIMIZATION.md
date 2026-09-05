@@ -568,22 +568,59 @@ bekerja normal — miss ini hanya terjadi sekali per percakapan, tepat setelah r
 Kalau pola ini konsisten, biaya sesi = satu prefill sebesar respons pertama; untuk respons
 pendek biayanya kecil, untuk one-shot 16k token seperti ini 37 s.
 
-**Dipersempit hari yang sama dengan `cache-probe.py`** (percakapan dua turn sintetis lewat API,
-`usage.prompt_tokens_details.cached_tokens` dibaca langsung, `max_tokens=1` untuk turn 2):
+**Dipersempit hari yang sama.** Dua sumber: capture traffic Pi di laptop (socat) dan
+`cache-probe.py` di server.
 
-| Cara mengirim balik turn assistant | prompt | cached | hit |
-|---|---|---|---|
-| turn 1 dikirim ulang persis (sanity) | 100 | 96 | 96.0% |
-| `content` saja, thinking dibuang | 328 | 96 | **29.3%** |
-| `content` + `reasoning_content` | 501 | 477 | **95.2%** |
+*Client (capture socat, percakapan Pi 2 turn tanpa tool):* Pi **mengirim balik `reasoning_content`**
+(28 kemunculan di body request), dan turn 2-nya hit 99.0% (task 15198). Jadi hipotesis "Pi membuang
+thinking" GUGUR untuk turn teks biasa.
 
-Dan token demi token, history yang di-render ulang dengan `reasoning_content` **identik** dengan
-478 token jalur generate (prompt + output). Jadi hipotesis (a) dan (b) gugur: sisi server
-cache-friendly asal client mengirim balik `reasoning_content`. Pola "cached = panjang prompt
-turn 1" di task 6875 persis sama dengan baris "thinking dibuang". `[Inferensi]` Pi tidak
-mengirim balik reasoning dalam bentuk yang dikenali template — dibuang, atau dikirim di field
-lain (mis. `reasoning` alih-alih `reasoning_content`). Belum dikonfirmasi dari traffic Pi;
-langkah ujinya ada di tracker.
+*Server (`cache-probe.py`, `usage.prompt_tokens_details.cached_tokens` dibaca langsung, turn 2
+`max_tokens=1`):* setiap bentuk turn yang dikirim balik apa adanya **HIT**:
+
+| Bentuk turn 1 | non-streaming | streaming (delta dirakit, arguments di-serialise ulang) |
+|---|---|---|
+| thinking + teks | HIT | HIT |
+| thinking + tool call | HIT | HIT |
+| thinking + teks + tool call | HIT | HIT |
+| ... dengan tool call 3.6k token (file HTML) | HIT | HIT |
+| thinking panjang (puzzle) + tool call | — | HIT |
+
+Dan diff token history yang di-render ulang vs token yang di-generate: **identik** untuk semua bentuk.
+Yang memecah cache hanya tiga hal (diff deterministik via `/apply-template`): `reasoning_content`
+dibuang atau dipindah ke field lain (`reasoning` diabaikan template); urutan key `arguments` berubah;
+newline di akhir nilai parameter di-strip. Source Pi (`packages/ai/src/api/openai-completions.ts`)
+tidak melakukan satu pun dari ketiganya: field mengikuti signature yang diterima (`reasoning_content`),
+`arguments` = `JSON.stringify` dari object hasil parse (urutan key terjaga), `content` kosong dibuang
+(render identik).
+
+**Mengapa satu mismatch berharga seluruh respons.** Model ini `qwen4exp`: layer SSM
+(`ssm.state_size` 128, `full_attention_interval` 4 → 3 dari 4 layer linear attention). State
+recurrent tidak bisa dimundurkan ke posisi sembarang, jadi llama-server hanya bisa kembali ke
+**context checkpoint** (`--ctx-checkpoints` 32, `--checkpoint-min-step` 8192; dibuat saat prompt
+processing, bukan saat generate). Mismatch di mana pun dalam turn → rollback ke checkpoint akhir prompt
+turn sebelumnya → prefill ulang seluruh respons. Terlihat di probe: variant tanpa reasoning selalu
+`cached` = ukuran prompt turn 1 (atau checkpoint lebih awal), bukan posisi mismatch. Pola task 6875
+(`cached` 1988 ≈ prompt turn 1 sebesar 1992) adalah tanda tangan rollback ini; mismatch-nya sendiri
+bisa di mana saja dalam 16k token itu.
+
+**Status: belum tereproduksi dari sisi server.** Reproduksi paling setia (prompt spreadsheet asli via
+`write_file`, streaming) menabrak `max_tokens` 24000 tanpa selesai (682 s decode) sehingga tidak
+konklusif. Langkah penentu berikutnya dieksekusi saat sesi Pi nyata: server sendiri bisa mencetak
+token di sekitar mismatch. Di launch script Sync:
+
+```bash
+LLAMA_SERVER_SLOTS_DEBUG=1 LLAMA_SERVER_SLOTS_N_DIFF=12 API_KEY=<key> ./stack.sh start llamacpp
+```
+
+lalu ulangi tugas Pi yang berakhir dengan tool call besar, dan cari di `runs/serve-current.log`
+baris `old: ... | ...` / `new: ... | ...` (WARN, tampil tanpa verbose) — token sebelum `|` cocok,
+sesudahnya adalah mismatch-nya. Env var diwariskan `stack.sh` → `serve.sh` → `llama-server`.
+
+Catatan `cache-ratio.py`: verdict "vLLM territory" 18.5% setelah sesi ini terpolusi probe sintetis
+(3 dari 5 cold call adalah probe). Tanpa probe: 3/25 = 12.0%, dan dua di antaranya adalah turn
+pertama percakapan baru yang memang selalu cold. Rasio cold dengan demikian bergantung pada panjang
+percakapan, bukan hanya pola tugas.
 
 **Catatan decode:** 33 tok/s agregat vs 36.7 tok/s di benchmark. Selisihnya konsisten dengan
 konteks yang jauh lebih panjang (benchmark ~2k, sesi ini sampai 40k) dan acceptance MTP yang

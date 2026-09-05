@@ -224,5 +224,5 @@ Notes:
 | `bench-code.sh` | coding-shaped benchmark against llama.cpp |
 | `bench-stream.py` | streaming benchmark; the only one valid for comparing across backends |
 | `cache-ratio.py` | prefix-cache hit rate of real usage, reconstructed from the llama-server log |
-| `cache-probe.py` | why turn 2 of a conversation misses the cache: resends the assistant turn with/without `reasoning_content` and diffs the re-rendered history against the generated tokens |
+| `cache-probe.py` | does resending a turn hit the prefix cache? Generates each turn shape (text, tool call, streaming...), resends it as a client would, reads `cached_tokens`, and diffs the re-rendered history against the generated tokens |
 | `bench-accuracy.py` | GSM8K + HumanEval+ through the API, same settings on either backend |
