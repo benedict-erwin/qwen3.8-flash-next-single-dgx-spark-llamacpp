@@ -47,7 +47,6 @@ OpenAI way, as `image_url` parts with an `http(s)://` URL or a `data:` URI.
 
 Measured 2026-09-05 (`runs/vision-2026-09-05.jsonl`), 336x336 PNGs:
 
-| | |
 |---|---|
 | Three colour stripes, "which colours, top to bottom?" | correct; 196 prompt tokens, 8.9 s wall incl. 318 tokens of reasoning + answer |
 | A drawn digit, "which character?" | correct; 190 prompt tokens, 2.1 s wall |
