@@ -97,11 +97,19 @@ Long context is where decode really drops (39 → 27 tok/s over a 70k coding ses
 and two open Unsloth PRs target exactly that: #150 (QSA inputs once per ubatch) and #165
 (attend only over the top-k cells instead of masking the whole cache). Measured
 2026-09-06 (`runs/longctx-2026-09-06.jsonl`, `bench-longctx.py`): #150's idea is already
-in the b10798 base in upstream form, and #165, ported onto this tree as
-`patches/unsloth-pr165-qsa-gather.diff`, only engages for single-token ubatches, so it
-never runs under MTP verification. Without MTP it gives +7% at 32k and +15% at 64k with
-greedy output identical up to 48k; with MTP, nothing. Not part of the recipe; the
-details and the multi-token extension that would be needed are in `OPTIMIZATION.md`.
+in the b10798 base in upstream form. #165 as written only engages for single-token
+ubatches, so it never runs under MTP verification; `patches/unsloth-pr165-qsa-gather.diff`
+is a port of it onto this tree extended to the 1 + draft verification batch, gated to
+contexts above 24k cells where it pays off. Greedy output stays byte-identical, and the
+verification step gets 9–13% shorter at 64k, about 3% at 32k, nothing below. Optional:
+
+```bash
+QSA_GATHER=1 ./build-fork.sh
+FORK=unsloth-qsa UBATCH=512 ./stack.sh start llamacpp
+```
+
+Not the default because it needs a build and only helps deep into a session; the
+measurements and the port's caveats are in `OPTIMIZATION.md`.
 
 ## Quick start
 
@@ -366,7 +374,7 @@ copy what you like, ignore the rest. [`pi/README.md`](pi/README.md) explains eac
 | `download-mtp.sh` | MTP draft head, 3.85 GiB |
 | `download-mmproj.sh` | vision projector, 0.85 GiB — enables images |
 | `download-fork.sh` | Unsloth llama.cpp prebuilt — required for MTP (`TAG=` for another release) |
-| `build-fork.sh` | rebuild that prebuilt's exact composition from source with the one-line MMQ crash fix (`patches/`) |
+| `build-fork.sh` | rebuild that prebuilt's exact composition from source with the one-line MMQ crash fix; `QSA_GATHER=1` adds the long-context gather patch (`patches/`) |
 | `bench-code.sh` | coding-shaped benchmark against llama.cpp |
 | `bench-stream.py` | streaming benchmark; the only one valid for comparing across backends |
 | `bench-longctx.py` | decode speed against context depth (8k–64k) from llama-server's own timings; llama.cpp A/B only, `--fixed` for byte-identity checks |

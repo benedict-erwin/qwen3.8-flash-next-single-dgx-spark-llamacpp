@@ -1029,12 +1029,44 @@ bermask membaca q8_0 langsung — bukan pola sel hilang atau mask salah, yang ak
 lebih awal dan di 32k juga. Konsisten dengan klaim PR (byte-identik di kartu mereka, di mana
 kedua jalur memakai tipe yang sama).
 
+### Ekstensi multi-token (dibuat sesi yang sama, atas permintaan user)
+
+Gate PR diganti: gather aktif untuk ubatch sampai 8 token per stream
+(`QWEN4EXP_QSA_GATHER_MAX_TPS`), yaitu decode biasa dan batch verifikasi MTP (1 + draft). K/V
+di-gather per token lewat satu daftar indeks yang diratakan `[n_topk*n_tps]` lalu di-reshape ke
+`[hd, n_head_kv, n_topk, n_tps*ns]`; mask lewat `get_rows` atas `mask_row` yang dilihat sebagai
+`[1, n_kv, n_tps, ns]`; Q terbagi sendiri menjadi `[hd, n_head, 1, n_tps*ns]` karena
+`build_attn_mha` membagi Q menurut `k->ne[3]`. Prompt chunk ratusan token tetap lewat jalur masked.
+
+**Benar secara numerik.** Prompt dibuat 31 748 dan 63 492 token (≡ 4 mod 512) supaya chunk prefill
+terakhir berisi 4 token dan lewat jalur gather multi-token; `MTP=0`, greedy, logprobs
+(`tmp/div-mt-*.json`): output 160 token byte-identik gather ON vs OFF di kedua ukuran, selisih
+logprob token pertama 0.000 dan 0.006 nats.
+
+**Efeknya di bawah MTP, diukur per langkah verifikasi** (tok/s terlalu bergantung acceptance;
+`predicted_ms / (predicted_n − draft_n_accepted)` = ms per step, `runs/longctx-2026-09-06.jsonl`):
+
+| ms per step (2 prompt) | 8k | 16k | 32k | 64k |
+|---|---|---|---|---|
+| kontrol: b10798+patch, port gather OFF, port 1-token (6 run) | 69–77 | 73–77 | 85–89 | 101–105 |
+| ekstensi, tanpa ambang (`qsa2-gather1-mtp`) | 78.0 / 73.8 | 82.4 / 74.2 | **77.3 / 75.6** | **92.4 / 86.9** |
+| ekstensi + ambang 24k, gather ON (`qsa3-gather1-mtp`) | 74.5 / 69.9 | 71.4 / 78.0 | 77.3 / 83.8 | **86.5 / 92.6** |
+| binary yang sama, `QWEN4EXP_QSA_GATHER=0` (`qsa3-gather0-mtp`) | 68.4 / 74.8 | 79.0 / 76.2 | 85.1 / 81.4 | 96.5 / 101.1 |
+
+Tanpa ambang, gather 4 token × 2 304 baris per layer membuat 8k–16k 3–5% lebih lambat, sedangkan
+32k–64k 12–13% lebih cepat; maka gate mendapat ambang `n_kv ≥ 24 576`
+(`QWEN4EXP_QSA_GATHER_MIN_KV`), di antara kedua titik. Dengan ambang itu, A/B di binary yang sama:
+64k **−9%** per step (89.5 vs 98.8 ms), 32k −3%, 16k −4% dan 8k +1% (keduanya jalur masked, jadi
+itu ukuran noise-nya ±4%). Gabungan dua run: 64k 9–13% lebih pendek per step ≈ +10–15% decode pada
+acceptance yang sama; 32k antara 3 dan 12%, tidak pasti; di bawah 24k nol by design. Ini konsisten
+dengan gain `MTP=0` (+7% 32k, +15% 64k).
+
 ### Keputusan
 
-Tidak dipakai: default tetap prebuilt b10715 (`-ub 256`, `--pmin 0.50`). Yang bisa memberi gain
-dengan MTP hanyalah ekstensi gather multi-token — gather K/V per token lewat indeks yang
-diratakan lalu Q dilihat sebagai `[hd, n_head, 1, n_tokens]` di dimensi ke-4 `build_attn_mha`
-(sekitar 40 baris) — dengan plafon `[estimate]` +15% di 64k dan nol di context pendek, atau
-menunggu upstream mengaktifkan sparse FA untuk head dim model ini (TODO di `qwen4exp.cpp`).
-Keduanya bukan bagian recipe. Harness `bench-longctx.py` tinggal untuk mengukur ulang kalau
-salah satunya terjadi.
+Tidak jadi default: butuh build sendiri, dan gainnya baru terasa di atas 32k. Tersedia sebagai
+opsi: `QSA_GATHER=1 ./build-fork.sh` menerapkan `patches/unsloth-pr165-qsa-gather.diff` (port
+#165 + ekstensi multi-token + ambang) di atas mix b10798 + patch crash, lalu
+`FORK=unsloth-qsa UBATCH=512 ./stack.sh start llamacpp`. Untuk sesi coding yang hidup di 30–70k
+(marked: 27 tok/s) `[estimate]` +10% di ujung atasnya. Jalan lain tetap menunggu upstream
+mengaktifkan sparse FA untuk head dim model ini (TODO di `qwen4exp.cpp`). `bench-longctx.py`
+tinggal untuk mengukur ulang.
