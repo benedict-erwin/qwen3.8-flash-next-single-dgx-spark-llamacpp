@@ -93,6 +93,16 @@ slower at prefill for reasons that are not the compiler. The shipped profile sta
 the prebuilt with `-ub 256` because it needs no build; this path becomes moot once
 #27044 lands upstream and in a prebuilt.
 
+Long context is where decode really drops (39 → 27 tok/s over a 70k coding session),
+and two open Unsloth PRs target exactly that: #150 (QSA inputs once per ubatch) and #165
+(attend only over the top-k cells instead of masking the whole cache). Measured
+2026-09-06 (`runs/longctx-2026-09-06.jsonl`, `bench-longctx.py`): #150's idea is already
+in the b10798 base in upstream form, and #165, ported onto this tree as
+`patches/unsloth-pr165-qsa-gather.diff`, only engages for single-token ubatches, so it
+never runs under MTP verification. Without MTP it gives +7% at 32k and +15% at 64k with
+greedy output identical up to 48k; with MTP, nothing. Not part of the recipe; the
+details and the multi-token extension that would be needed are in `OPTIMIZATION.md`.
+
 ## Quick start
 
 First-time setup (downloads ~110 GB) is in [`SETUP.md`](SETUP.md). Once that is done:
@@ -359,6 +369,7 @@ copy what you like, ignore the rest. [`pi/README.md`](pi/README.md) explains eac
 | `build-fork.sh` | rebuild that prebuilt's exact composition from source with the one-line MMQ crash fix (`patches/`) |
 | `bench-code.sh` | coding-shaped benchmark against llama.cpp |
 | `bench-stream.py` | streaming benchmark; the only one valid for comparing across backends |
+| `bench-longctx.py` | decode speed against context depth (8k–64k) from llama-server's own timings; llama.cpp A/B only, `--fixed` for byte-identity checks |
 | `cache-ratio.py` | prefix-cache hit rate of real usage, reconstructed from the llama-server log |
 | `cache-probe.py` | does resending a turn hit the prefix cache? Generates each turn shape (text, tool call, streaming...), resends it as a client would, reads `cached_tokens`, and diffs the re-rendered history against the generated tokens |
 | `bench-accuracy.py` | GSM8K + HumanEval+ through the API, same settings on either backend |

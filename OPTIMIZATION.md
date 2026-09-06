@@ -962,3 +962,79 @@ Yang tersisa untuk 40+ di context pendek: `PMIN=0.50` (+10% terukur) di atas bui
 Catatan: b10798 memuat upstream #28123 "qwen4exp: support recurrent state rollback". `[Inferensi]`
 ini bisa memangkas biaya cache miss token drift (rollback ke checkpoint akhir prompt sebelumnya);
 belum diukur ulang dengan `cache-probe.py`.
+
+## 2026-09-06: PR Unsloth #150/#165 (QSA decode di context panjang) — diuji, diport, tidak dipakai
+
+Dua PR terbuka di fork Unsloth menyasar penurunan decode di context panjang yang kita ukur
+sendiri (39 tok/s di prompt pendek → 27 tok/s di 30–70k pada sesi marked). Klaimnya di kartu
+discrete: #150 menghitung input tata letak QSA sekali per ubatch, bukan 48× per layer
+(decode 131k 16.2 → 21.1 tok/s di 2× RTX 3090); #165 mengganti attention bermask atas seluruh
+cache dengan gather 2 048 cell terpilih (141k: 7.1 → 18–22 tok/s di 2× A6000), plus batching
+top-k CUDA, scan kv-cells, dan mask kompak. Keduanya menargetkan branch
+`qwen4exp/qwen3.8-flash-next` milik fork, bukan tree upstream yang dipakai mix.
+
+### Temuan sebelum build
+
+1. **Ide #150 sudah ada di b10798** dalam bentuk upstream: #27941 (2026-09-01) membagi satu set
+   input QSA ke semua layer (`qsa_inps` di `qwen4exp.cpp`, komentar "the layers sharing a ratio
+   share one input set") dan scan host-nya 865 µs per ubatch di 33k menurut TODO di
+   `llama-memory-hybrid-idx.cpp`. Prebuilt b10715 (terpasang) belum memuatnya. Merge PR-nya ke mix
+   gagal di 11 file (sejarah paralel: pin mix vs branch fork), dan tidak perlu.
+2. **Sparse flash attention upstream (#27970) belum berlaku untuk model ini.** `qwen4exp.cpp`
+   punya satu baris `build_attn_mha(..., top_k->ne[0], ...)` yang dikomentari dengan "TODO: enable
+   sparse attention when we are ready", tetapi kernel CUDA-nya hanya ada untuk head dim 512/576
+   (`may_use_sparse` di `fattn-mma-f16.cuh`, yaitu DeepSeek V4). Mengaktifkan baris itu tidak
+   mengubah apa-apa di sini.
+3. **#165 bisa diport, dengan satu penyesuaian semantik.** Empat file masuk bersih lewat 3-way
+   apply (`qwen4exp.cpp`, `llama-graph.cpp`, `models.h`, `top-k.cu`); hunk `kv-cells.h` usang
+   (fungsinya sudah diganti upstream); `set_input_qsa` mix ditulis ulang total, jadi `mask_row`
+   ditambahkan manual. Shortcut top-k per blok milik PR DIMATIKAN: `blk_cells` di mix hanya memuat
+   grup yang penuh, sel tail yang belum penuh duduk di satu blok cadangan yang barisnya nol, jadi
+   ekspansi blok → sel akan membuang tail dan meng-attend cell 0 berulang. Jalur gather per sel
+   (inti penghematannya) dipertahankan. Hasil: `patches/unsloth-pr165-qsa-gather.diff` (398 baris)
+   di atas tree `build-fork.sh` b10798 + patch crash; build bersih.
+
+### Hasil (`runs/longctx-2026-09-06.jsonl`, `bench-longctx.py`, 256 token output, 2 prompt berbeda per titik)
+
+| decode tok/s | 8k | 16k | 32k | 64k |
+|---|---|---|---|---|
+| terpasang b10715 `-ub 256`, MTP | 34.7 / 43.6 | 44.4 / 29.2 | 40.6 / 37.8 | 33.2 / 26.0 |
+| b10798+patch `-ub 512`, MTP | 38.0 / 37.2 | 37.1 / 34.3 | 37.0 / 39.4 | 32.5 / 30.1 |
+| port #165 gather ON, MTP | 45.0 / 37.4 | 32.2 / 36.2 | 38.2 / 37.5 | 28.8 / 33.3 |
+| port #165 gather OFF, MTP | 45.1 / 34.4 | 35.3 / 38.9 | 39.9 / 38.0 | 32.5 / 34.1 |
+| port #165 gather ON, **MTP=0** | 24.7 / 24.8 | 23.9 / 24.1 | **22.7 / 22.5** | **19.5 / 19.6** |
+| port #165 gather OFF, **MTP=0** | 24.9 / 24.9 | 23.6 / 23.6 | 21.1 / 21.3 | 16.9 / 16.8 |
+
+Prefill ikut tercatat: 359 tok/s di 64k pada build terpasang, 458–500 di build `-ub 512`
+(efek patch crash, bukan gather; top-k batching #165 tidak terlihat di angka prefill).
+
+**Gather-nya bekerja, tapi hanya tanpa MTP.** Dengan `MTP=0` gainnya +7% di 32k dan +15% di 64k,
+nol di 8k (gate `n_kv >= 2×width` belum lewat). Attention atas seluruh cache memang bagian yang
+tumbuh: tanpa gather decode turun 24.9 → 16.9 dari 8k ke 64k, dengan gather 24.7 → 19.5, jadi
+gather mengembalikan sekitar sepertiga dari kehilangan itu, bukan 2.5× seperti di A6000 —
+`[Inferensi]` di GB10 memori unified membuat mask 18 MB/token dan loop host jauh lebih murah,
+sehingga yang tersisa untuk dihemat lebih kecil. Dengan MTP menyala angka gather ON dan OFF
+identik dalam noise (sebaran acceptance draft 0.66–0.96 menggeser decode ±8 tok/s), dan
+penyebabnya ada di kodenya: jalur gather hanya aktif kalau ubatch berisi satu token per stream
+(`gather = n_tokens == n_stream && ...`), sedangkan verifikasi MTP mengirim 1 + draft token
+sekaligus. Jadi pada profil terpasang #165 praktis tidak pernah berjalan.
+
+**Output tetap benar, dalam batas numerik.** Prompt yang benar-benar sama, greedy, `MTP=0`
+(`bench-longctx.py --fixed`, label `qsa-fixed-*`; `tmp/div-*.json` untuk logprobs): 8k, 32k, dan
+48k byte-identik gather ON vs OFF sepanjang 128–160 token. 64k berbeda mulai token ke-8 pada
+pilihan yang hampir seri (`run` −0.64 vs `in` −0.77 nats di satu sisi, terbalik di sisi lain);
+selisih logprob per token sebelum titik itu maksimum 0.18 nats. Itu pola perbedaan jalur numerik
+— gather men-dequantize K/V q8_0 ke F32 lewat `get_rows` lalu F16 untuk flash attention, jalur
+bermask membaca q8_0 langsung — bukan pola sel hilang atau mask salah, yang akan muncul jauh
+lebih awal dan di 32k juga. Konsisten dengan klaim PR (byte-identik di kartu mereka, di mana
+kedua jalur memakai tipe yang sama).
+
+### Keputusan
+
+Tidak dipakai: default tetap prebuilt b10715 (`-ub 256`, `--pmin 0.50`). Yang bisa memberi gain
+dengan MTP hanyalah ekstensi gather multi-token — gather K/V per token lewat indeks yang
+diratakan lalu Q dilihat sebagai `[hd, n_head, 1, n_tokens]` di dimensi ke-4 `build_attn_mha`
+(sekitar 40 baris) — dengan plafon `[estimate]` +15% di 64k dan nol di context pendek, atau
+menunggu upstream mengaktifkan sparse FA untuk head dim model ini (TODO di `qwen4exp.cpp`).
+Keduanya bukan bagian recipe. Harness `bench-longctx.py` tinggal untuk mengukur ulang kalau
+salah satunya terjadi.
