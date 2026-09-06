@@ -112,10 +112,13 @@ unified memory, and overcommitting it caused an `NVRM NV_ERR_NO_MEMORY` stall an
 watchdog kernel panic on 2026-09-01.
 
 It also starts llama-server with `-ub 256`. The CUDA backend (Unsloth fork and
-upstream alike) aborts in `cublasGemmEx` on certain prefill batches — one HumanEval
-prompt reproduced it every time — and capping the physical batch at 256 avoided every
-case we could reproduce. Details and the sweep in `OPTIMIZATION.md`; reported upstream as
-ggml-org/llama.cpp#28377.
+upstream alike) dies on certain prefill batch sizes — one HumanEval prompt reproduced it
+every time — and capping the physical batch at 256 avoided every case we could reproduce.
+The error first surfaced in `cublasGemmEx` and was reported as ggml-org/llama.cpp#28377,
+but `CUDA_LAUNCH_BLOCKING=1` later pinned the real culprit: the MMQ `MUL_MAT_ID` kernel,
+upstream issue #27792, whose one-line fix (#27044) is still unmerged. Until it lands, the
+workaround costs ~4 s of cold TTFT; the optional build above removes the crash without
+that cost. Details and the sweeps in `OPTIMIZATION.md`.
 
 ## Images
 
