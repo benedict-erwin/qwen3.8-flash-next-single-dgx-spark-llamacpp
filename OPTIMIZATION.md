@@ -1061,12 +1061,37 @@ itu ukuran noise-nya ±4%). Gabungan dua run: 64k 9–13% lebih pendek per step 
 acceptance yang sama; 32k antara 3 dan 12%, tidak pasti; di bawah 24k nol by design. Ini konsisten
 dengan gain `MTP=0` (+7% 32k, +15% 64k).
 
+**Titik 100k** (prompt 99 960 token, binary yang sama, label `qsa3-*` target 100000): gain-nya
+terus membesar dengan kedalaman context.
+
+| 100k | gather ON | gather OFF |
+|---|---|---|
+| MTP, decode tok/s (2 prompt) | **32.6 / 35.5** | 27.8 / 27.0 |
+| MTP, ms per step verifikasi | **104.8 / 104.5** | 124.5 / 124.6 |
+| `MTP=0`, decode tok/s | **16.6** | 13.7 |
+| prefill tok/s | 412–429 | 412–429 |
+
+Per step −16%, decode +21–25%. Dengan gather, decode di 100k setara decode di 64k tanpa gather.
+
+**Akurasi di kedalaman itu setara** (`runs/accuracy-2026-09-06.jsonl`, `bench-accuracy-longctx.py`):
+eval biasa tidak menyentuh patch ini karena prompt GSM8K/HumanEval+ hanya 1–2k token, di bawah
+ambang. Maka 100 soal GSM8K pertama (prompt `gsm8k_cot_zeroshot`, thinking off, greedy, seed 1234,
+sama seperti `bench-accuracy.py`) diberi prefix 30 000 token source code yang sama supaya jalur
+gather aktif di setiap jawaban (prefix dilayani prompt cache: rata-rata 29 337 token cached, 753
+di-prefill ulang per soal). Hasil: gather ON **98/100**, gather OFF **97/100**, dua soal yang salah
+sama di keduanya (#93, #98), OFF salah satu lagi (#12). 43/100 respons byte-identik; sisanya beda
+karena greedy + MTP memang tidak deterministik (bagian 2026-09-06 "Greedy tidak deterministik").
+Tanpa prefix, build lama mencetak 96.3% di 300 soal (2026-09-04), jadi prefix 30k tidak merusak
+apa-apa. HumanEval+ tidak diulang: evalplus membangun prompt sendiri, tidak bisa disisipi prefix.
+
 ### Keputusan
 
-Tidak jadi default: butuh build sendiri, dan gainnya baru terasa di atas 32k. Tersedia sebagai
-opsi: `QSA_GATHER=1 ./build-fork.sh` menerapkan `patches/unsloth-pr165-qsa-gather.diff` (port
-#165 + ekstensi multi-token + ambang) di atas mix b10798 + patch crash, lalu
-`FORK=unsloth-qsa UBATCH=512 ./stack.sh start llamacpp`. Untuk sesi coding yang hidup di 30–70k
-(marked: 27 tok/s) `[estimate]` +10% di ujung atasnya. Jalan lain tetap menunggu upstream
-mengaktifkan sparse FA untuk head dim model ini (TODO di `qwen4exp.cpp`). `bench-longctx.py`
-tinggal untuk mengukur ulang.
+Tidak jadi default recipe (keputusan user, 2026-09-06): butuh build sendiri, patch-nya pinned ke
+mix b10798 dan hanya kita yang memeliharanya, dan gain-nya baru terasa di atas 24k. Tetapi untuk
+sesi panjang ini profil yang DIREKOMENDASIKAN: `QSA_GATHER=1 ./build-fork.sh` menerapkan
+`patches/unsloth-pr165-qsa-gather.diff` (port #165 + ekstensi multi-token + ambang) di atas mix
+b10798 + patch crash, lalu `FORK=unsloth-qsa UBATCH=512 ./stack.sh start llamacpp`; prebuilt tetap
+default untuk instalasi pertama. Untuk sesi coding yang hidup di 30–70k (marked: 27 tok/s)
+`[estimate]` +10% di ujung atasnya, +25% kalau sampai 100k. Jalan lain tetap menunggu upstream
+mengaktifkan sparse FA untuk head dim model ini (TODO di `qwen4exp.cpp`). `bench-longctx.py` dan
+`bench-accuracy-longctx.py` tinggal untuk mengukur ulang.

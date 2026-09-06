@@ -27,6 +27,7 @@ number links to the file it came from; none is typed from memory.
 | TTFT, 10.9k-token prompt | 26.2 s cold, 1.8 s on a prefix-cache hit | `runs/bench-stream2.jsonl` |
 | Decode, benchmark | 36.7 tok/s at p-min 0.75 (median of 2, `-ub 256`); p-min 0.50, the default since 2026-09-06, measured +10% on matched prompts | `runs/bench-stream2.jsonl` |
 | Decode, real coding sessions | 33.0 tok/s at ≤40k context; 27.0 tok/s at 30–70k | `runs/cache-ratio-2026-09-05.jsonl`, `runs/cache-ratio-2026-09-06-marked.jsonl` |
+| Decode vs depth, same build | 43/35 tok/s at 8k, 33/26 at 64k (MTP); the optional `QSA_GATHER=1` build below holds 33–36 at 100k | `runs/longctx-2026-09-06.jsonl` |
 | Prefix-cache hit, real sessions | 95.9% (23 requests); 99.1%, 0 cold (94 requests) | same two files |
 | MTP draft acceptance, real sessions | 0.86 | same two files |
 | Accuracy, thinking off, greedy | GSM8K 97.3%, HumanEval+ 93.9% | `runs/accuracy-2026-09-04.jsonl` |
@@ -101,15 +102,19 @@ in the b10798 base in upstream form. #165 as written only engages for single-tok
 ubatches, so it never runs under MTP verification; `patches/unsloth-pr165-qsa-gather.diff`
 is a port of it onto this tree extended to the 1 + draft verification batch, gated to
 contexts above 24k cells where it pays off. Greedy output stays byte-identical, and the
-verification step gets 9–13% shorter at 64k, about 3% at 32k, nothing below. Optional:
+gain grows with depth: the verification step gets 9–13% shorter at 64k and 16% at 100k,
+where decode goes 27 → 33–36 tok/s; about 3% at 32k, nothing below. GSM8K behind a 30k
+prefix (`bench-accuracy-longctx.py`, 100 items): 98 with the patch, 97 without, same two
+misses. Recommended for long sessions; the prebuilt stays the default for a first install:
 
 ```bash
-QSA_GATHER=1 ./build-fork.sh
+QSA_GATHER=1 ./build-fork.sh                      # ~15 min, on top of the crash fix above
 FORK=unsloth-qsa UBATCH=512 ./stack.sh start llamacpp
 ```
 
-Not the default because it needs a build and only helps deep into a session; the
-measurements and the port's caveats are in `OPTIMIZATION.md`.
+Not the default because it needs a build, the patch is pinned to the b10798 mix and
+maintained only here, and it only helps deep into a session; the measurements and the
+port's caveats are in `OPTIMIZATION.md`.
 
 ## Quick start
 
@@ -381,6 +386,7 @@ copy what you like, ignore the rest. [`pi/README.md`](pi/README.md) explains eac
 | `cache-ratio.py` | prefix-cache hit rate of real usage, reconstructed from the llama-server log |
 | `cache-probe.py` | does resending a turn hit the prefix cache? Generates each turn shape (text, tool call, streaming...), resends it as a client would, reads `cached_tokens`, and diffs the re-rendered history against the generated tokens |
 | `bench-accuracy.py` | GSM8K + HumanEval+ through the API, same settings on either backend |
+| `bench-accuracy-longctx.py` | GSM8K behind a fixed long prefix, for attention changes that only engage deep in the context |
 
 ## Credits
 
