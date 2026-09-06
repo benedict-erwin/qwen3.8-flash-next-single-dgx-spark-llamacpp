@@ -381,8 +381,3 @@ copy what you like, ignore the rest. [`pi/README.md`](pi/README.md) explains eac
 - [pi.dev](https://pi.dev), [evalplus](https://github.com/evalplus/evalplus) and
   [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) — the agent
   harness and the accuracy harnesses used for the measurements.
-
-## Contributors
-
-- [benedict-erwin](https://github.com/benedict-erwin) — measurements, decisions, hardware
-- Claude (Anthropic) — analysis, scripts and write-ups, working in this repo through Claude Code
