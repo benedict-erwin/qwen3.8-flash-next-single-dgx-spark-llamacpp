@@ -84,10 +84,12 @@ fork pins) on this machine, applies the line, and builds it:
 FORK=unsloth-mixfix UBATCH=512 ./stack.sh start llamacpp
 ```
 
-Measured 2026-09-06 (`runs/bench-stream2.jsonl`, labels `mixfix-*`): cold TTFT on the
-10.9k prompt 26.2 → 23.4 s, decode unchanged (38.0 / 36.2 tok/s at ub 256 / 512), and the
-1..600 ubatch sweep that crashes the prebuilt at 367 and 512 runs clean. Everything else
-(MTP, images, `PMIN`) is identical because only the binary directory changes.
+Measured 2026-09-06 on the default tag (`b10798-mix-659e406`, `runs/bench-stream2.jsonl`
+labels `b10798fix-*`): cold TTFT on the 10.9k prompt 26.2 → 21.1 s, decode 36.7 → 39.0
+tok/s (the newer upstream base adds MoE and attention fusions), and the 1..600 ubatch
+sweep that crashes the prebuilt at 367 and 512 runs clean. Everything else (MTP, images,
+`PMIN`) is identical because only the binary directory changes. `TAG=b10715-mix-86bd2d3`
+rebuilds the shipped prebuilt's base instead (23.4 s / 36.2 tok/s, also clean).
 
 Two warnings from getting there, in `OPTIMIZATION.md`: the fork's release tags are
 manifests, not source trees, so cloning a tag and building it does not give you the

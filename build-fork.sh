@@ -10,12 +10,12 @@
 # PR commits pinned in scripts/unsloth/pr-set.json (merged in order). patches/compose-mix.py
 # reproduces that composition on a full upstream clone; then the patch is applied and the
 # tree is built with the flags that matter on GB10 (CUB 3.2, native sm_121a only).
-# Measured 2026-09-06: this build matches the prebuilt's TTFT and decode, and the 1..600
-# ubatch sweep that crashed the prebuilt at 367 and 512 runs clean at -ub 512.
+# Measured 2026-09-06: at -ub 512 the 1..600 ubatch sweep that crashed the prebuilt at 367 and
+# 512 runs clean; b10798 base: TTFT 21.1 s / 39.0 tok/s vs the shipped 26.2 s / 36.7 tok/s.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-TAG="${TAG:-b10715-mix-86bd2d3}"        # fork release tag: its pr-set.json defines the mix
+TAG="${TAG:-b10798-mix-659e406}"        # fork release tag: its pr-set.json defines the mix (b10798: +6% decode vs b10715, measured)
 UPSTREAM_TAG="${TAG%%-*}"               # b10715
 OUT="forks/${FORK_OUT:-unsloth-mixfix}"
 MANIFEST="forks/src-manifest-$TAG"

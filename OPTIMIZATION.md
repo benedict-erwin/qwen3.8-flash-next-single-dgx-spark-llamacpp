@@ -930,3 +930,32 @@ token mentah ukuran 367/512 pada `-ub 512`; server restart per baris)
 - Profil terpasang **tidak diubah**: prebuilt + `-ub 256` tetap default karena tidak butuh build.
   Ini opsi untuk yang mau, dan menjadi tidak perlu begitu #27044 di-merge upstream dan masuk ke
   prebuilt Unsloth.
+
+### 2026-09-06 (lanjutan): basis b10798 + patch, dan uji CUDA graphs
+
+Dua hal berikutnya dari daftar optimasi lanjutan, dikerjakan dengan pipeline yang sama
+(`TAG=b10798-mix-659e406 ./build-fork.sh`; `runs/bench-stream2.jsonl` label `b10798fix-*`,
+`runs/crash-sweep-2026-09-04.jsonl` entri b10798):
+
+| | prebuilt b10715 + `-ub 256` (terpasang) | mix b10715 + patch, `-ub 512` | **mix b10798 + patch, `-ub 512`** |
+|---|---|---|---|
+| Sweep ubatch 1–600 | crash tanpa ub 256 | 600/600 | **600/600, 0 CUDA error** |
+| TTFT 10.9k | 26.2 s | 23.4 s | **21.1 s (−20%)** |
+| Decode | 36.7 tok/s | 36.2 | **39.0 (+6%)** |
+
+Kenaikan decode-nya datang dari 83 commit upstream antara b10715 dan b10798 — fusion MoE
+diperluas ke speculative decoding, fusi reduksi expert berbobot, swizzle tile K/V flash
+attention, indexer qwen4exp per slice — bukan dari patch. Sama seperti yang terukur di prebuilt
+b10798 (39.3 tok/s di ub 256), hanya sekarang tanpa crash. Ini build terbaik yang ada saat ini;
+`build-fork.sh` memakai tag ini sebagai default.
+
+**CUDA graphs bukan overhead tersembunyi.** A/B pada build yang sama, ub 256:
+`GGML_CUDA_DISABLE_GRAPHS=1` → 37.5 vs 38.9 tok/s, sekitar −4%, TTFT sama. Jadi graphs memang
+aktif di jalur verifikasi MTP dan sumbangannya kecil; per-step overhead yang tersisa ada di tempat
+lain (gather PLE di CPU, indexer QSA, sinkronisasi draft). Kandidat patch "graph cache" dicoret.
+Yang tersisa untuk 40+ di context pendek: `PMIN=0.50` (+10% terukur) di atas build ini
+`[estimate]` ~43 tok/s; untuk context panjang: PR Unsloth #150/#165 (QSA decode) belum dicoba.
+
+Catatan: b10798 memuat upstream #28123 "qwen4exp: support recurrent state rollback". `[Inferensi]`
+ini bisa memangkas biaya cache miss token drift (rollback ke checkpoint akhir prompt sebelumnya);
+belum diukur ulang dengan `cache-probe.py`.

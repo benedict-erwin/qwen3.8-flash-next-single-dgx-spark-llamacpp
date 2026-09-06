@@ -48,3 +48,10 @@
 {"label": "mixfix-ub256", "run": 3, "src": "llama.cpp/common/arg.cpp", "ttft_s": 24.12, "total_s": 30.49, "chunks": 256, "tokens": 256, "chars": 1009, "finish": "length", "decode_tps": 40.01}
 {"label": "mixfix-ub512", "run": 2, "src": "llama.cpp/src/llama-kv-cache.cpp", "ttft_s": 23.4, "total_s": 30.44, "chunks": 256, "tokens": 256, "chars": 1036, "finish": "length", "decode_tps": 36.23}
 {"label": "mixfix-ub512", "run": 2, "src": "llama.cpp/src/llama-kv-cache.cpp", "ttft_s": 23.49, "total_s": 30.57, "chunks": 256, "tokens": 256, "chars": 1049, "finish": "length", "decode_tps": 36.04}
+{"label": "b10798fix-ub512", "run": 2, "src": "llama.cpp/src/llama-kv-cache.cpp", "ttft_s": 22.77, "total_s": 29.62, "chunks": 256, "tokens": 256, "chars": 1033, "finish": "length", "decode_tps": 37.2}
+{"label": "b10798fix-ub512", "run": 3, "src": "llama.cpp/common/arg.cpp", "ttft_s": 19.43, "total_s": 25.67, "chunks": 256, "tokens": 256, "chars": 980, "finish": "length", "decode_tps": 40.86}
+{"label": "b10798fix-ub256", "run": 2, "src": "llama.cpp/src/llama-kv-cache.cpp", "ttft_s": 27.62, "total_s": 34.67, "chunks": 256, "tokens": 256, "chars": 1042, "finish": "length", "decode_tps": 36.2}
+{"label": "b10798fix-ub256", "run": 3, "src": "llama.cpp/common/arg.cpp", "ttft_s": 23.71, "total_s": 29.85, "chunks": 256, "tokens": 256, "chars": 958, "finish": "length", "decode_tps": 41.57}
+{"label": "b10798fix-nographs-ub256", "run": 2, "src": "llama.cpp/src/llama-kv-cache.cpp", "ttft_s": 27.75, "total_s": 35.09, "chunks": 256, "tokens": 256, "chars": 1051, "finish": "length", "decode_tps": 34.75}
+{"label": "b10798fix-nographs-ub256", "run": 3, "src": "llama.cpp/common/arg.cpp", "ttft_s": 23.62, "total_s": 29.97, "chunks": 256, "tokens": 256, "chars": 957, "finish": "length", "decode_tps": 40.18}
+{"label": "b10798fix-ub256", "run": 2, "src": "llama.cpp/src/llama-kv-cache.cpp", "ttft_s": 27.73, "total_s": 34.84, "chunks": 256, "tokens": 256, "chars": 1049, "finish": "length", "decode_tps": 35.88}
