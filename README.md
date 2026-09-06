@@ -365,3 +365,24 @@ copy what you like, ignore the rest. [`pi/README.md`](pi/README.md) explains eac
 | `cache-ratio.py` | prefix-cache hit rate of real usage, reconstructed from the llama-server log |
 | `cache-probe.py` | does resending a turn hit the prefix cache? Generates each turn shape (text, tool call, streaming...), resends it as a client would, reads `cached_tokens`, and diffs the re-rendered history against the generated tokens |
 | `bench-accuracy.py` | GSM8K + HumanEval+ through the API, same settings on either backend |
+
+## Credits
+
+- [MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark)
+  — the vLLM recipe for the same model on the same hardware. Its "patch the runtime and
+  build it yourself" approach is what `build-fork.sh` copies to llama.cpp, its
+  reduced-vocabulary drafting is the decode idea noted in `OPTIMIZATION.md`, and the
+  greedy-non-determinism report in its issue tracker prompted the same test here.
+- [unslothai/llama.cpp](https://github.com/unslothai/llama.cpp) — the fork, its prebuilts,
+  the MTP draft head and the GGUF quants this recipe runs on; `patches/compose-mix.py`
+  reproduces its release composition with its own `additive_merge.py`.
+- [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) — the server itself, and
+  PR #27044 for the one-line fix carried in `patches/`.
+- [pi.dev](https://pi.dev), [evalplus](https://github.com/evalplus/evalplus) and
+  [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) — the agent
+  harness and the accuracy harnesses used for the measurements.
+
+## Contributors
+
+- [benedict-erwin](https://github.com/benedict-erwin) — measurements, decisions, hardware
+- Claude (Anthropic) — analysis, scripts and write-ups, working in this repo through Claude Code
