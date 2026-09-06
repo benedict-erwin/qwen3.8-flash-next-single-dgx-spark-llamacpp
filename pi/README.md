@@ -26,6 +26,11 @@ Why these values, all from measurements in `../OPTIMIZATION.md`:
 
 ## Optional tweaks I use for longer sessions
 
+- **`PMIN=0.50 ./stack.sh start llamacpp`** on the server side: ~10% faster decode on
+  benchmark prompts, same answers, at the cost of more rejected drafts. See "Optional:
+  `PMIN=0.50`" in the top-level README for the measurements and the caveat that it is not
+  yet measured on a full agent session.
+
 None of these change the recipe's defaults; each is one setting on your side.
 
 - **Run the server at the model's native 262k.** `CTX=262144 ./stack.sh start llamacpp`

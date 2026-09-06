@@ -41,6 +41,35 @@ cache because the generated tokens are not the canonical tokenisation of their t
 on this hybrid model such a miss re-prefills the whole previous response — 7 s after a
 2.6k-token answer, 37 s after a 16k one (`OPTIMIZATION.md`, 2026-09-06).
 
+### Optional: `PMIN=0.50` for ~10% faster decode
+
+The MTP drafter proposes up to 3 tokens per step and stops early when its confidence for
+the next token drops below `--spec-draft-p-min`. The recipe ships 0.75. Measured on
+2026-09-06 (`runs/bench-stream2.jsonl`, labels `sweepA2-*`, three fresh-cache restarts per
+side, identical prompts):
+
+| | p-min 0.75 (default) | p-min 0.50 |
+|---|---|---|
+| decode, same code prompt, 3 restarts | 34.0 / 36.0 / 35.0 tok/s | 39.0 / 39.1 / 38.1 tok/s |
+| draft acceptance | 0.93 | 0.84 |
+| accepted draft tokens per step | 3.21 | 3.30 |
+| TTFT | unchanged | unchanged |
+
+```bash
+PMIN=0.50 ./stack.sh start llamacpp
+```
+
+**What it does not change:** the answer. The target model verifies every drafted token and
+keeps only what it would have produced itself, so p-min sets how much draft work is
+wasted, not what comes out. **What it costs:** more rejected drafts (acceptance 0.93 →
+0.84, each one a wasted read of the draft head), so the gain shrinks on text the drafter
+predicts badly. Coding-agent traffic is easy for it — real sessions here run at 0.84–0.91
+acceptance even at 0.75, far above the ~0.4 where a lower p-min would start to lose — but
+the 0.50 figure has only been measured on benchmark prompts, not yet on a full agent
+session. `nmax 4` was also tried: +2.5%, within noise, not adopted. Note that with MTP on,
+greedy output is not bit-reproducible at either setting (`OPTIMIZATION.md`, 2026-09-06);
+`MTP=0 ./stack.sh start llamacpp` restores exact reproducibility at ~24 tok/s.
+
 ## Quick start
 
 First-time setup (downloads ~110 GB) is in [`SETUP.md`](SETUP.md). Once that is done:
