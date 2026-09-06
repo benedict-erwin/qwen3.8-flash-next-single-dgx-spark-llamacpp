@@ -808,3 +808,43 @@ memakai `/v1/completions` mentah tanpa chat template, dan pada prompt-prompt itu
 mengeluarkan token akhir. Ini artefak harness, bukan bug server, dan tidak bergantung pada parameter
 speculative. Konsekuensinya: tiap start hanya menghasilkan 1–2 run valid dari 3. Cacat harness #6
 untuk diperbaiki kalau benchmark ini dipakai lagi: pakai chat completions atau tambah prompt.
+
+---
+
+## 2026-09-06: Greedy tidak deterministik — dan di llama.cpp penyebabnya MTP
+
+Pemicu: issue #28 di repo Mia (reproduksi independen di Spark lain): pada vLLM mereka, lima request
+identik `temperature=0` menghasilkan lima output berbeda, **juga dengan MTP mati**, dan pada prompt
+"lanjutkan cerita" model kadang membaca ulang context verbatim, yang menggelembungkan acceptance MTP
+(0.93 pada recital vs 0.37–0.41 pada generasi jujur) dan dengan itu angka decode prosa mereka.
+
+Diuji di server kita, dua prompt (kode dan prosa), lima request identik per prompt, `max_tokens`
+220, greedy, semua request mendarat di slot yang sama (slot 3, prefix-cache hit 4 token) sehingga
+rotasi slot bukan variabel:
+
+| | MTP 3 (profil terpasang) | MTP mati (`MTP=0 ./stack.sh start llamacpp`) |
+|---|---|---|
+| kode, output berbeda | **5/5**, divergen setelah ~275 karakter | **1/5** — identik byte per byte |
+| prosa, output berbeda | **3/5**, divergen setelah ~236 karakter | **1/5** |
+
+Jadi berbeda dari vLLM: **jalur non-spekulatif llama.cpp deterministik**, dan non-determinisme
+datang dari speculative decoding. `[Inferensi]` Saat verifikasi, target memproses 1+n token dalam satu
+batch, bukan satu token; bentuk batch yang berbeda memakai jalur kernel/urutan reduksi yang berbeda,
+dan pada logit yang hampir seri argmax-nya bisa berbeda. Karena panjang draft tiap step bergantung
+pada `p-min` dan isi, bentuk batch berubah-ubah, dan satu token berbeda mengubah semua yang
+mengikutinya. Ini juga penjelasan yang konsisten untuk token boundary drift (bagian 2026-09-06 di
+atas): draft mengusulkan pemenggalan token yang bukan kanonik, dan target menerimanya pada seri.
+
+Konsekuensi praktis:
+- Output tetap berkualitas sama secara rata-rata (tiap token adalah argmax target pada batch itu),
+  tapi **tidak bit-reproducible** selama MTP aktif. Eval akurasi kita (2026-09-04) dijalankan dengan
+  MTP on, jadi angka 97.3% / 93.9% punya varian run-ke-run kecil yang belum diukur; untuk eval yang
+  harus reproducible, pakai `MTP=0`.
+- Benchmark decode pada prompt yang mengundang kutipan (mis. "jelaskan file ini") menaikkan
+  acceptance. Angka bench kita 0.93 vs 0.86 di sesi coding nyata konsisten dengan efek itu; angka
+  sesi nyata yang mewakili.
+- `stack.sh` kini menerima `MTP=0` untuk diagnostik semacam ini; decode tanpa MTP ~24 tok/s.
+
+Dua hal lain dari issue Mia yang tidak berlaku di sini: blok attention QSA 3 200 token yang membuat
+prefix-cache hit mustahil di bawah ~6 400 token prompt — di llama.cpp probe kita hit pada prompt
+100 token; dan recital verbatim belum kita amati di sesi coding (acceptance 0.84–0.86, bukan 0.93).
