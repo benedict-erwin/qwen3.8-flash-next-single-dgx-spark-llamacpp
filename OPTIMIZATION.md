@@ -472,6 +472,16 @@ dalam ubatch 2048/512 penuh; hanya ubatch terakhir yang berukuran acak, dan tiga
 tidak cukup untuk menabraknya. Coding agent yang mengirim ratusan prompt beragam **akan**
 menabraknya cepat atau lambat — 468 request eval menabraknya di request ke-369.
 
+**2026-09-06, jalur env runtime dicoba dan gagal.** Build ini punya `GGML_CUDA_CUBLAS_COMPUTE_TYPE`
+(f32 / bf16 / f16 / auto) yang mengganti compute type di `ggml_cuda_mul_mat_cublas`. Diuji pada
+`-ub 512` dengan probe token mentah ukuran 367 (`runs/crash-sweep-2026-09-04.jsonl`, entri
+2026-09-06): kontrol crash, dan **ketiga compute type crash di ukuran yang sama**, di
+`cublasGemmEx` yang sama. Jadi bukan soal presisi akumulasi; panggilan cuBLAS untuk shape itu gagal
+apa pun compute type-nya. `GGML_CUDA_FORCE_MMQ` (matmul terkuantisasi memakai kernel ggml sendiri,
+tanpa cuBLAS) di build ini hanya ada sebagai opsi compile-time, jadi satu-satunya jalur yang tersisa
+tanpa menunggu upstream adalah build fork dari source dengan `-DGGML_CUDA_FORCE_MMQ=ON` — opsi C di
+tracker. `-ub 256` tetap mitigasi yang dipakai.
+
 Dilaporkan ke upstream sebagai **ggml-org/llama.cpp#28377** (2026-09-04) dengan reproduksi
 sweep di atas. Kandidat terkait: #28251 (call site sama, `cublasGemmEx` di jalur MoE, status
 cuBLAS berbeda, RTX 3070) dan #27792 (OOB read di MMQ `mul_mat_id`, jalur kernel berbeda
