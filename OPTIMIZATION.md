@@ -1,55 +1,55 @@
-# Recipe optimal Qwen3.8-Flash-Next di DGX Spark GB10
+# Optimal recipe for Qwen3.8-Flash-Next on DGX Spark GB10
 
-> Riset lanjutan 2026-09-02. Menggantikan sebagian kesimpulan `RESULTS.md` (lihat "Koreksi" di bawah).
-> Semua angka ukuran tensor di dokumen ini diparse langsung dari GGUF lokal
-> (`models/UD-Q4_K_XL/*.gguf`), bukan dari model card.
+> Follow-up research 2026-09-02. Supersedes part of the conclusions in `RESULTS.md` (see "Correction" below).
+> All tensor size numbers in this document are parsed directly from the local GGUF
+> (`models/UD-Q4_K_XL/*.gguf`), not from the model card.
 
-> ## ⚠️ HASIL EKSEKUSI 2026-09-03 — beberapa klaim di bawah TERBANTAH
+> ## ⚠️ EXECUTION RESULTS 2026-09-03 — several claims below are REFUTED
 >
-> Rencana di dokumen ini sudah dieksekusi sampai langkah 5. Ringkasnya: **tidak ada
-> satu pun jalur yang menghasilkan percepatan.** Detail di bagian "Hasil eksekusi"
-> di bawah. Yang perlu dibaca dengan koreksi:
+> The plan in this document has been executed through step 5. In short: **not a single
+> path produced a speedup.** Details in the "Execution results" section
+> below. What has to be read with a correction:
 >
-> - **"+3-10% dari update build"** → sebenarnya **+0.4%** (dalam noise). Angka
->   +24.7% yang sempat kulaporkan adalah artefak metode benchmark, bukan speedup.
-> - **"MTP tersedia sebagai sidecar 2.60 GB"** → benar bahwa filenya ada, **salah**
->   bahwa upstream bisa memakainya. Kedua varian ditolak `llama.cpp` 0ba6499.
-> - **"Proyeksi 31-39 tok/s"** → belum terbukti dan saat ini terblokir.
-> - **"origin/master sudah menyambungkan MTP ke qwen4exp"** → graph-nya ada, tapi
->   loader untuk draft head terpisah tidak. Grep 35 referensi nextn/mtp tidak cukup
->   sebagai bukti; seharusnya diuji, bukan disimpulkan.
-> - **Efisiensi roofline** yang benar: **57%** (23.71 / 41.4), bukan 51% atau 66%.
+> - **"+3-10% from the build update"** → actually **+0.4%** (within noise). The
+>   +24.7% figure I reported at one point is an artefact of the benchmark method, not a speedup.
+> - **"MTP available as a 2.60 GB sidecar"** → true that the file exists, **false**
+>   that upstream can use it. Both variants are rejected by `llama.cpp` 0ba6499.
+> - **"Projected 31-39 tok/s"** → not proven and currently blocked.
+> - **"origin/master already wires MTP into qwen4exp"** → the graph is there, but
+>   the loader for a separate draft head is not. Grepping 35 nextn/mtp references is not enough
+>   as evidence; it should have been tested, not inferred.
+> - The correct **roofline efficiency**: **57%** (23.71 / 41.4), not 51% or 66%.
 
 ## TL;DR
 
-1. **MTP ternyata TERSEDIA untuk model yang sudah kita punya.** Kesimpulan lama ("MTP gagal, harus ganti GGUF, download besar lagi") **salah**. Unsloth merilis MTP head sebagai **file sidecar terpisah 2.60 GB** yang dipasang di samping UD-Q4_K_XL kita yang sekarang — tidak perlu download ulang 104 GB.
-2. **llama.cpp kita ketinggalan 40 commit**, dan `origin/master` **sudah** menyambungkan MTP ke arsitektur `qwen4exp`. Waktu kita tes 2026-09-01, dukungan itu memang belum ada di build kita. Cukup `git pull` + rebuild.
-3. **Decode kita sudah mentok memory bandwidth, bukan salah konfigurasi.** Efisiensi kita 51–53% dari roofline — sama dengan sistem GB10 lain yang dilaporkan publik. Artinya tidak ada "flag ajaib" yang tersisa; satu-satunya cara naik signifikan adalah **mengurangi byte per token** (quant lebih kecil) atau **menaikkan token per byte** (speculative decoding).
-4. **Rekomendasi: recipe gabungan** — UD-Q4_K_XL (yang sudah ada) + MTP sidecar + `-lm mmap` + llama.cpp terbaru. Proyeksi **31–39 tok/s** `[estimate]` dengan retensi 92.3% tetap, resident turun dari ~104 → **~77 GiB**.
+1. **MTP turns out to be AVAILABLE for the model we already have.** The old conclusion ("MTP failed, we have to swap GGUFs, another big download") is **wrong**. Unsloth released the MTP head as a **separate 2.60 GB sidecar file** that is attached alongside our current UD-Q4_K_XL — no need to re-download 104 GB.
+2. **Our llama.cpp is 40 commits behind**, and `origin/master` **already** wires MTP into the `qwen4exp` architecture. When we tested on 2026-09-01, that support genuinely was not in our build. A `git pull` + rebuild is enough.
+3. **Our decode is already memory-bandwidth bound, not misconfigured.** Our efficiency is 51–53% of roofline — the same as other publicly reported GB10 systems. That means there is no "magic flag" left; the only way to gain significantly is to **reduce bytes per token** (a smaller quant) or **raise tokens per byte** (speculative decoding).
+4. **Recommendation: a combined recipe** — UD-Q4_K_XL (what we already have) + MTP sidecar + `-lm mmap` + latest llama.cpp. Projected **31–39 tok/s** `[estimate]` with retention still 92.3%, resident down from ~104 → **~77 GiB**.
 
 ---
 
-## 1. Batas fisik: di mana sebenarnya kita berdiri
+## 1. The physical limit: where we actually stand
 
-### Anatomi model (parse langsung dari GGUF lokal)
+### Model anatomy (parsed directly from the local GGUF)
 
-| Kelompok tensor | GiB | % file | Dibaca per token? |
+| Tensor group | GiB | % of file | Read per token? |
 |---|---|---|---|
-| MoE experts (`*_exps`) | 71.73 | 69.2% | **Tidak** — hanya 10 dari 512 expert |
-| PLE (`per_layer_token_embd`) | 26.82 | 25.9% | Tidak — cuma lookup baris |
-| attn / ssm / norm | 3.86 | 3.7% | **Ya, penuh** |
-| `token_embd` + `output` | 1.26 | 1.2% | Sebagian (`output` penuh) |
+| MoE experts (`*_exps`) | 71.73 | 69.2% | **No** — only 10 of 512 experts |
+| PLE (`per_layer_token_embd`) | 26.82 | 25.9% | No — just a row lookup |
+| attn / ssm / norm | 3.86 | 3.7% | **Yes, in full** |
+| `token_embd` + `output` | 1.26 | 1.2% | Partly (`output` in full) |
 | **TOTAL** | **103.68** | | |
 
-Validasi: total tensor 103.68 GiB = ukuran file di disk 103.69 GiB. PLE terukur **4.500 bit/elemen** untuk 51,2 miliar elemen — cocok dengan angka "26.82 GB lookup table" yang beredar di diskusi llama.cpp.
+Validation: tensor total 103.68 GiB = file size on disk 103.69 GiB. PLE measures **4.500 bits/element** for 51.2 billion elements — matching the "26.82 GB lookup table" figure that circulates in llama.cpp discussions.
 
-### Roofline decode
+### Decode roofline
 
-Byte yang harus dibaca per token = attn/ssm penuh + 10/512 experts + output head:
+Bytes that must be read per token = full attn/ssm + 10/512 experts + output head:
 
 ```
-attn/ssm/norm (penuh)     3.86 GiB   63%
-experts aktif (10/512)    1.40 GiB   23%
+attn/ssm/norm (full)      3.86 GiB   63%
+active experts (10/512)   1.40 GiB   23%
 output head               0.63 GiB   10%
 --------------------------------------------
 per token                 5.90 GiB = 6.34 GB
@@ -57,59 +57,59 @@ per token                 5.90 GiB = 6.34 GB
 
 GB10 = 273 GB/s → **roofline ≈ 43 tok/s**.
 
-| Konfigurasi | Ukuran | Terukur | % roofline |
+| Configuration | Size | Measured | % of roofline |
 |---|---|---|---|
-| UD-Q4_K_XL — kita, 2026-09-01 | 103.69 GiB | 21.8 tok/s | **51%** |
-| UD-Q4_K_XL — forum NVIDIA | 103.69 GiB | 25.0 tok/s | 58% |
+| UD-Q4_K_XL — ours, 2026-09-01 | 103.69 GiB | 21.8 tok/s | **51%** |
+| UD-Q4_K_XL — NVIDIA forum | 103.69 GiB | 25.0 tok/s | 58% |
 | UD-IQ1_S — kubesimplify (tg128) | 67.55 GiB | 34.5 tok/s | 54% |
 
-**Ini temuan terpenting dari riset ini.** Dua quant berbeda, di hardware yang sama, jatuh di efisiensi bandwidth yang hampir identik (51–54%). Rasio kecepatan 34.5/21.8 = 1.58 hampir persis rasio ukuran 103.69/67.55 = 1.54.
+**This is the most important finding of this research.** Two different quants, on the same hardware, land at almost identical bandwidth efficiency (51–54%). The speed ratio 34.5/21.8 = 1.58 is almost exactly the size ratio 103.69/67.55 = 1.54.
 
-Artinya: **setup kita tidak salah konfigurasi.** Angka 34.5 tok/s yang beredar itu bukan "recipe lebih baik", itu cuma **quant yang jauh lebih kecil dan lebih rusak** (IQ1_S = 3.28 bpw efektif). Berhenti mencari flag yang hilang — carilah cara mengurangi byte/token atau menaikkan token/byte.
+Meaning: **our setup is not misconfigured.** The 34.5 tok/s figure going around is not a "better recipe", it is simply a **much smaller and much more damaged quant** (IQ1_S = 3.28 bpw effective). Stop looking for a missing flag — look for ways to reduce bytes/token or raise tokens/byte.
 
 ---
 
-## 2. Koreksi terhadap `RESULTS.md`
+## 2. Correction to `RESULTS.md`
 
-`RESULTS.md` menyatakan: *"MTP GAGAL — GGUF Unsloth tidak punya MTP/nextn head... Untuk benar-benar dapat MTP: harus ganti ke GGUF ber-MTP, quant berbeda, download besar lagi."*
+`RESULTS.md` states: *"MTP FAILED — the Unsloth GGUF has no MTP/nextn head... To really get MTP: you have to switch to an MTP-bearing GGUF, a different quant, another big download."*
 
-**Bagian pertama benar, kesimpulannya salah.** Yang benar:
+**The first part is right, the conclusion is wrong.** What is actually true:
 
-- Model utama memang tidak punya tensor `nextn` (grep = 0 tensor — masih valid hari ini).
-- Tapi MTP head Flash-Next adalah **satu blok qwen4exp utuh (4B param)** yang bisa berdiri sebagai **file draft terpisah** dan dipasang dengan `-md`. Bukan sesuatu yang harus menyatu dengan GGUF target.
-- Unsloth sudah merilisnya di `unsloth/Qwen3.8-Flash-Next-GGUF` direktori `MTP/`:
+- The main model indeed has no `nextn` tensors (grep = 0 tensors — still true today).
+- But the Flash-Next MTP head is **a whole qwen4exp block (4B params)** that can stand as a **separate draft file** and be attached with `-md`. Not something that has to be fused into the target GGUF.
+- Unsloth has already released it in `unsloth/Qwen3.8-Flash-Next-GGUF` under the `MTP/` directory:
 
-  | File | Ukuran | Draft acceptance |
+  | File | Size | Draft acceptance |
   |---|---|---|
   | `mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf` | 2.60 GB | 66.1% |
   | `mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf` | 1.78 GB | 64.4% |
   | `mtp-Qwen3.8-Flash-Next-shared-BF16.gguf` | 4.87 GB | 66.5% |
 
-- Ada juga jalur pihak ketiga `dzannotti/Qwen3.8-Flash-Next-MTP-GGUF` (2.5 GB Q4_K_M), eksplisit **"tested with unsloth's UD-Q4_K_XL and UD-IQ4_XS"** — persis file kita.
+- There is also a third-party route, `dzannotti/Qwen3.8-Flash-Next-MTP-GGUF` (2.5 GB Q4_K_M), explicitly **"tested with unsloth's UD-Q4_K_XL and UD-IQ4_XS"** — exactly our files.
 
-**Kenapa dulu gagal:** build kita `5d4a3be` (2026-08-31) belum punya graph MTP untuk `qwen4exp`. Dicek hari ini: di commit kita, case `LLM_ARCH_QWEN4EXP` punya **0** referensi nextn/mtp; di `origin/master` sekarang ada **35**. Errornya benar, tapi penyebabnya versi llama.cpp, bukan ketiadaan MTP head.
+**Why it failed back then:** our build `5d4a3be` (2026-08-31) did not yet have the MTP graph for `qwen4exp`. Checked today: in our commit, the `LLM_ARCH_QWEN4EXP` case has **0** nextn/mtp references; in `origin/master` today there are **35**. The error was correct, but its cause was the llama.cpp version, not the absence of an MTP head.
 
 ---
 
-## 3. Yang kita ketinggalan di llama.cpp (40 commit)
+## 3. What we are behind on in llama.cpp (40 commits)
 
-Commit relevan antara `5d4a3be` dan `origin/master`:
+Relevant commits between `5d4a3be` and `origin/master`:
 
-| Commit | Isi | Dampak |
+| Commit | Content | Impact |
 |---|---|---|
-| `0eadefe` | `qwen4exp: support recurrent state rollback` (#28123) | **Prasyarat MTP** — rollback state SSM saat draft ditolak |
-| `36b1015` | `qwen4exp: fix seq_cp, block position keying, cuda abort` (#27941) | Stabilitas |
-| `09412af` | `qwen4exp: sum the indexer heads by slices` (#28023) | Perf indexer |
-| `3466812` | `cuda: fuse MoE weighted expert reduction` (#25952) | **Decode MoE lebih cepat** |
-| `e4b9af0` | `CUDA: XOR swizzle flash attn K,V smem fp16 tiles` (#25635) | Flash-attention lebih cepat |
+| `0eadefe` | `qwen4exp: support recurrent state rollback` (#28123) | **MTP prerequisite** — SSM state rollback when a draft is rejected |
+| `36b1015` | `qwen4exp: fix seq_cp, block position keying, cuda abort` (#27941) | Stability |
+| `09412af` | `qwen4exp: sum the indexer heads by slices` (#28023) | Indexer perf |
+| `3466812` | `cuda: fuse MoE weighted expert reduction` (#25952) | **Faster MoE decode** |
+| `e4b9af0` | `CUDA: XOR swizzle flash attn K,V smem fp16 tiles` (#25635) | Faster flash-attention |
 
-Dua yang terakhir memberi speedup langsung tanpa MTP sama sekali `[estimate]` +3–10%.
+The last two give a direct speedup with no MTP at all `[estimate]` +3–10%.
 
 ---
 
-## 4. Peringkat opsi
+## 4. Ranking the options
 
-### ⭐ A+. UD-Q4_K_XL (existing) + MTP sidecar + mmap — **rekomendasi**
+### ⭐ A+. UD-Q4_K_XL (existing) + MTP sidecar + mmap — **recommended**
 
 ```bash
 llama-server \
@@ -120,31 +120,31 @@ llama-server \
   -fa on --cache-type-k q8_0 --cache-type-v q8_0 -c 32768
 ```
 
-- Download: **2.60 GB** saja. Model 104 GB yang sudah ada dipakai apa adanya.
-- Retensi tetap **92.3%** — MTP itu *lossless*: draft yang salah ditolak, output identik dengan non-spec.
-- Proyeksi **31–39 tok/s** `[estimate]`, dasar: Strix Halo (unified memory, kelas bandwidth mirip) 20.3 → 35.8 tok/s (+76%) di kode; M3 Max 27.4 → 38.8 (+42%). Prosa akan di ujung bawah, kode di ujung atas.
-- `-lm mmap` menaruh PLE 26.82 GiB di **page cache** (reclaimable), bukan resident → resident ~**77 GiB**.
+- Download: **2.60 GB** only. The existing 104 GB model is used as-is.
+- Retention stays **92.3%** — MTP is *lossless*: wrong drafts are rejected, output is identical to non-spec.
+- Projected **31–39 tok/s** `[estimate]`, basis: Strix Halo (unified memory, similar bandwidth class) 20.3 → 35.8 tok/s (+76%) on code; M3 Max 27.4 → 38.8 (+42%). Prose will be at the low end, code at the high end.
+- `-lm mmap` puts the 26.82 GiB PLE in **page cache** (reclaimable) instead of resident → resident ~**77 GiB**.
 
-### A. UD-Q4_K_XL apa adanya (status quo)
-21.8 tok/s, 92.3%, resident ~104 GiB. Titik aman yang sudah terbukti.
+### A. UD-Q4_K_XL as-is (status quo)
+21.8 tok/s, 92.3%, resident ~104 GiB. The proven safe point.
 
 ### B. blazux NVFP4 + vLLM
-Resident ~76 GiB, decode 26 tok/s (NVFP4) / **31 tok/s** (hybrid fp8 side-layer), **prefill 1.500–2.000 tok/s** — 20–40× prefill kita. Stack docker + vLLM patched, bukan llama.cpp.
-- Ini pemenang mutlak **kalau prompt panjang** (agentic, RAG, codebase). Prefill kita ~50–800 tok/s adalah kelemahan terbesar opsi A, dan MTP **tidak memperbaiki prefill sama sekali**.
+Resident ~76 GiB, decode 26 tok/s (NVFP4) / **31 tok/s** (hybrid fp8 side-layer), **prefill 1,500–2,000 tok/s** — 20–40× our prefill. A docker + patched-vLLM stack, not llama.cpp.
+- This is the outright winner **if prompts are long** (agentic, RAG, codebase). Our ~50–800 tok/s prefill is the biggest weakness of option A, and MTP **does not improve prefill at all**.
 
 ### C. UD-IQ4_XS + MTP
-93.7 GiB, retensi 89.6%, per-token ~5.3 GiB → baseline ~24 tok/s, dengan MTP ~34–43 `[estimate]`. Tukar 2.7 poin retensi untuk ~10% kecepatan. Kurang menarik dibanding A+.
+93.7 GiB, retention 89.6%, per-token ~5.3 GiB → baseline ~24 tok/s, with MTP ~34–43 `[estimate]`. Trades 2.7 points of retention for ~10% speed. Less attractive than A+.
 
 ### D. UD-IQ1_S
-34.5 tok/s tapi 3.28 bpw — retensi jauh di bawah target 90%. Hanya untuk draft/eksperimen.
+34.5 tok/s but 3.28 bpw — retention far below the 90% target. Only for draft/experiments.
 
 ---
 
-## 5. Bisa bikin recipe sendiri? Bisa — dan analisisnya menunjuk arah yang berlawanan dengan intuisi
+## 5. Can we build our own recipe? Yes — and the analysis points in the opposite direction from intuition
 
-Breakdown traffic per token, per family tensor (di luar experts & PLE):
+Per-token traffic breakdown, by tensor family (excluding experts & PLE):
 
-| Tensor family | GiB | % traffic per token |
+| Tensor family | GiB | % of traffic per token |
 |---|---|---|
 | `attn_qkv.weight` | 0.934 | 15.2% |
 | `output.weight` | 0.629 | 10.2% |
@@ -155,52 +155,52 @@ Breakdown traffic per token, per family tensor (di luar experts & PLE):
 | `attn_output.weight` | 0.187 | 3.0% |
 | `hc_*` (hyper-connections) ×4 | 0.624 | 10.2% |
 
-**Insight yang bisa dipakai:** aturan quant konvensional — "jaga attention tetap presisi tinggi, tekan experts" — **terbalik untuk kecepatan decode di model ini**:
+**The usable insight:** the conventional quant rule — "keep attention at high precision, squeeze the experts" — is **inverted for decode speed on this model**:
 
-- Experts = **69% file** tapi cuma **23% traffic/token**. Menekan experts Q4→Q3 memangkas file ~18 GiB tapi decode hanya +6% `[estimate]`, dengan biaya kualitas menyebar ke semua domain.
-- attn/ssm = **3.7% file** tapi **63% traffic/token**. Menurunkan 4 family teratas (`attn_qkv`, `attn_gate`, `ssm_out`, `attn_q` = 2.43 GiB = 41% traffic) dari ~5 bpw ke 4 bpw memangkas ~0.49 GiB/token → **+9% decode** dengan file hampir tidak berubah.
+- Experts = **69% of the file** but only **23% of traffic/token**. Squeezing experts Q4→Q3 cuts ~18 GiB off the file but decode only +6% `[estimate]`, at a quality cost that spreads across every domain.
+- attn/ssm = **3.7% of the file** but **63% of traffic/token**. Dropping the top 4 families (`attn_qkv`, `attn_gate`, `ssm_out`, `attn_q` = 2.43 GiB = 41% of traffic) from ~5 bpw to 4 bpw cuts ~0.49 GiB/token → **+9% decode** with the file size almost unchanged.
 
-Jadi recipe quant custom untuk hardware ini akan berbentuk: **experts dibiarkan setinggi mungkin (kualitas murah di sini), tensor per-token ditekan**. Ini kebalikan dari resep Baekpica yang menaikkan presisi edge layers.
+So a custom quant recipe for this hardware would take the shape: **leave experts as high as possible (quality is cheap there), squeeze the per-token tensors**. This is the opposite of the Baekpica recipe, which raises the precision of edge layers.
 
-**Tapi:** hasil maksimalnya cuma ~+10–15%, sementara MTP memberi +40–76% tanpa mengorbankan kualitas sama sekali. Dan bikin quant sendiri butuh source Q8_0 188 GB atau BF16 355 GB (download besar → wajib konfirmasi dulu) plus imatrix run berjam-jam.
+**But:** the maximum result is only ~+10–15%, while MTP gives +40–76% with no quality sacrifice at all. And rolling our own quant needs either a Q8_0 188 GB or BF16 355 GB source (big download → must confirm first) plus hours of imatrix runs.
 
-**Kesimpulan: kerjakan MTP dulu. Custom quant baru masuk akal kalau setelah MTP masih kurang cepat**, dan lebih tepat diarahkan ke penghematan *memori* (biar muat berdampingan dengan Ollama) ketimbang kecepatan.
+**Conclusion: do MTP first. A custom quant only makes sense if it is still too slow after MTP**, and it is better aimed at saving *memory* (so it fits alongside Ollama) than at speed.
 
 ---
 
-## 6. Rencana eksekusi bertahap
+## 6. Staged execution plan
 
-| # | Langkah | Biaya | Ekspektasi | Risiko |
+| # | Step | Cost | Expectation | Risk |
 |---|---|---|---|---|
-| 1 | `git pull` llama.cpp + rebuild CUDA | ~15 mnt | +3–10%, unlock MTP | Rendah — build terpisah, biner lama disimpan |
-| 2 | Re-bench baseline dengan build baru | ~10 mnt | Angka pembanding bersih | — |
-| 3 | Tes `--spec-type ngram-mod` (**belum pernah dicoba** — kemarin kita pakai `ngram-cache`) | ~10 mnt | Gratis; sparkrun lapor sampai ~45 tok/s di kerja copy-heavy | — |
-| 4 | Download MTP head Q8_0 (2.60 GB) | ~5 mnt | — | — |
-| 5 | Bench MTP `n-max` 2 vs 3, prosa vs kode | ~20 mnt | **31–39 tok/s** | Sedang — spec bisa regresi di backend tertentu |
-| 6 | Tambah `-lm mmap`, ukur resident | ~10 mnt | ~104 → ~77 GiB | Rendah |
-| 7 | *(opsional)* blazux vLLM stack kalau prefill jadi masalah | ~2 jam + docker | prefill 20–40× | Tinggi — stack custom |
+| 1 | `git pull` llama.cpp + CUDA rebuild | ~15 min | +3–10%, unlocks MTP | Low — separate build, old binary kept |
+| 2 | Re-bench the baseline with the new build | ~10 min | A clean comparison number | — |
+| 3 | Test `--spec-type ngram-mod` (**never tried** — yesterday we used `ngram-cache`) | ~10 min | Free; sparkrun reports up to ~45 tok/s on copy-heavy work | — |
+| 4 | Download the Q8_0 MTP head (2.60 GB) | ~5 min | — | — |
+| 5 | Bench MTP `n-max` 2 vs 3, prose vs code | ~20 min | **31–39 tok/s** | Medium — spec can regress on certain backends |
+| 6 | Add `-lm mmap`, measure resident | ~10 min | ~104 → ~77 GiB | Low |
+| 7 | *(optional)* blazux vLLM stack if prefill becomes the problem | ~2 hours + docker | prefill 20–40× | High — custom stack |
 
-Total langkah 1–6: **± 1 jam**, download 2.6 GB. Di bawah ambang "tanya dulu" (>30 mnt proses / >10 GB download) kecuali langkah 7.
+Total for steps 1–6: **± 1 hour**, 2.6 GB download. Below the "ask first" threshold (>30 min of processing / >10 GB download) except for step 7.
 
-### Catatan memori — relevan dengan insiden 2026-09-01
+### Memory note — relevant to the 2026-09-01 incident
 
-`-lm mmap` bukan cuma soal hemat. PLE 26.82 GiB di page cache itu **reclaimable**: saat memori menipis, kernel membuang page cache dan model melambat. Tanpa mmap, alokasi itu resident dan menipisnya memori berujung `NVRM NV_ERR_NO_MEMORY` → stall → watchdog panic, persis yang terjadi 2026-09-01.
+`-lm mmap` is not only about saving. The 26.82 GiB PLE in page cache is **reclaimable**: when memory gets tight, the kernel drops the page cache and the model slows down. Without mmap that allocation is resident and running out of memory ends in `NVRM NV_ERR_NO_MEMORY` → stall → watchdog panic, exactly what happened on 2026-09-01.
 
-**`-lm mmap` mengubah mode gagal dari kernel panic menjadi sekadar lambat.** Itu alasan yang cukup untuk memakainya, terlepas dari angka resident.
+**`-lm mmap` changes the failure mode from a kernel panic to merely slow.** That alone is reason enough to use it, regardless of the resident numbers.
 
-Tetap begitu, resident ~77 GiB + KV masih belum nyaman berdampingan dengan beban Ollama sekarang (~36.5 GiB): 77 + 36.5 = 113.5 dari 121.7 GiB, dan page cache PLE akan terus diusir → decode anjlok. Decision #4 (stop Ollama sebelum serve) tetap berlaku.
+Even so, resident ~77 GiB + KV is still not comfortable alongside the current Ollama load (~36.5 GiB): 77 + 36.5 = 113.5 of 121.7 GiB, and the PLE page cache would be evicted continuously → decode collapses. Decision #4 (stop Ollama before serving) still stands.
 
-## 7. Yang belum terverifikasi
+## 7. Not yet verified
 
-- Angka speedup MTP Unsloth (1.67×, "83.2 → 138.8 tok/s") jelas **bukan** dari GB10 — hardware tidak disebut `[Belum Terverifikasi]`. Yang bisa dipindah ke kasus kita hanyalah **acceptance rate ~66%**.
-- Proyeksi 31–39 tok/s diturunkan dari Strix Halo & M3 Max (sama-sama unified memory) `[estimate]`. PR #27836 mencatat CUDA unified memory dapat "gain serupa", tapi tidak ada angka GB10 spesifik yang saya temukan.
-- `--spec-type ngram-mod` belum pernah kita ukur sama sekali.
-- Retensi akurasi NVFP4 (opsi B): **diukur sendiri 2026-09-04**, setara dengan UD-Q4_K_XL
-  pada GSM8K dan HumanEval+ — lihat bagian "Retensi akurasi: diukur" di bawah. Model card
-  RadixArk melaporkan GSM8K 97.27 vs BF16 97.12–97.50 (vendor-reported).
-- Tidak ada draft head DFlash/DSpark untuk Flash-Next (yang beredar hanya untuk Qwen3.8-27B) — jalur itu tertutup untuk sekarang.
+- The Unsloth MTP speedup figure (1.67×, "83.2 → 138.8 tok/s") is clearly **not** from a GB10 — the hardware is not stated `[Unverified]`. The only thing transferable to our case is the **acceptance rate ~66%**.
+- The 31–39 tok/s projection is derived from Strix Halo & M3 Max (both unified memory) `[estimate]`. PR #27836 notes that CUDA unified memory gets "similar gains", but I found no GB10-specific numbers.
+- `--spec-type ngram-mod` we have never measured at all.
+- NVFP4 accuracy retention (option B): **measured ourselves 2026-09-04**, on par with UD-Q4_K_XL
+  on GSM8K and HumanEval+ — see the "Accuracy retention: measured" section below. The RadixArk
+  model card reports GSM8K 97.27 vs BF16 97.12–97.50 (vendor-reported).
+- There is no DFlash/DSpark draft head for Flash-Next (the ones circulating are only for Qwen3.8-27B) — that route is closed for now.
 
-## Sumber
+## Sources
 
 - https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/blob/main/MTP/README.md
 - https://huggingface.co/dzannotti/Qwen3.8-Flash-Next-MTP-GGUF
@@ -214,314 +214,314 @@ Tetap begitu, resident ~77 GiB + KV masih belum nyaman berdampingan dengan beban
 
 ---
 
-# Hasil eksekusi 2026-09-03
+# Execution results 2026-09-03
 
-Semua angka dari `runs/bench-2026-09-03.jsonl`, 3 run per konfigurasi, `n_predict` 256, temperature 0.
+All numbers from `runs/bench-2026-09-03.jsonl`, 3 runs per configuration, `n_predict` 256, temperature 0.
 
-## Temuan metodologis: benchmark lama melebih-lebihkan 14.6%
+## Methodological finding: the old benchmark overstated by 14.6%
 
-`bench.sh` versi lama mengirim **prompt yang sama 3 kali dengan temperature 0**. Karena
-output-nya identik tiap run, server bisa memanfaatkan slot/KV reuse — dan untuk
-speculative decoding, n-gram cache tinggal menyalin output run sebelumnya.
+The old `bench.sh` sent **the same prompt 3 times at temperature 0**. Because
+the output was identical every run, the server could exploit slot/KV reuse — and for
+speculative decoding, the n-gram cache simply copied the previous run's output.
 
-| Metode | build lama | build baru | + ngram-mod |
+| Method | old build | new build | + ngram-mod |
 |---|---|---|---|
-| A: prompt sama diulang 3× | 21.80 | **27.18** | **86.05** |
-| B: 5 prompt berbeda dirotasi | 23.62 | **23.71** | **23.58** |
+| A: same prompt repeated 3× | 21.80 | **27.18** | **86.05** |
+| B: 5 different prompts rotated | 23.62 | **23.71** | **23.58** |
 
-Selisih A vs B pada build yang sama: **+14.6%** tanpa spekulasi, dan **+263%** dengan
-ngram-mod. `bench.sh` sekarang merotasi 5 prompt berbeda; metode A tidak boleh dipakai lagi.
+The A vs B gap on the same build: **+14.6%** without speculation, and **+263%** with
+ngram-mod. `bench.sh` now rotates 5 different prompts; method A must not be used again.
 
-## Hasil sebenarnya (metode B)
+## The real results (method B)
 
-| Konfigurasi | Median tok/s | vs baseline | Draft accepted |
+| Configuration | Median tok/s | vs baseline | Draft accepted |
 |---|---|---|---|
-| build 5d4a3be (lama) | 23.62 | — | — |
-| build 0ba6499 (63 commit lebih baru) | 23.71 | **+0.4%** | — |
+| build 5d4a3be (old) | 23.62 | — | — |
+| build 0ba6499 (63 commits newer) | 23.71 | **+0.4%** | — |
 | + `--spec-type ngram-mod` | 23.58 | **-0.6%** | 0 |
-| + `--spec-type draft-mtp` | — | **GAGAL LOAD** | — |
+| + `--spec-type draft-mtp` | — | **FAILED TO LOAD** | — |
 
-**Update llama.cpp tidak memberi percepatan decode yang terukur.** `cuda: fuse MoE
-weighted expert reduction` (#25952) dan `XOR swizzle flash attn` (#25635) tidak
-mengubah apa pun untuk model ini pada beban single-stream.
+**The llama.cpp update gives no measurable decode speedup.** `cuda: fuse MoE
+weighted expert reduction` (#25952) and `XOR swizzle flash attn` (#25635) change
+nothing for this model on a single-stream load.
 
-**ngram-mod tidak memberi gain di prosa** — nol draft diterima dengan prompt bervariasi,
-konsisten dengan hasil `ngram-cache` 2026-09-01 (acceptance 16%). Kesimpulan lama bahwa
-ngram "belum pernah dicoba dan mungkin berbeda" sudah terjawab: sama saja.
+**ngram-mod gives no gain on prose** — zero drafts accepted with varied prompts,
+consistent with the `ngram-cache` result of 2026-09-01 (16% acceptance). The old conclusion that
+ngram "has never been tried and might be different" is now answered: it is the same.
 
-## MTP terblokir di upstream llama.cpp
+## MTP is blocked in upstream llama.cpp
 
-Kedua varian head Unsloth ditolak build 0ba6499:
+Both Unsloth head variants are rejected by build 0ba6499:
 
-| Varian | Ukuran | Tensor | Error |
+| Variant | Size | Tensors | Error |
 |---|---|---|---|
 | `mtp-...-shared-Q8_0.gguf` | 2.60 GiB | 32 | `tensor 'token_embd.weight' not found` |
 | `mtp-...-Q8_0.gguf` (standalone) | 3.85 GiB | 34 | `tensor 'output_hc_norm.weight' not found` |
 
-Diverifikasi dengan membandingkan set tensor terhadap model target (1224 tensor):
+Verified by diffing the tensor set against the target model (1224 tensors):
 
 | Tensor | target | MTP standalone | MTP shared |
 |---|---|---|---|
-| `token_embd.weight` | ada | ada | **tidak** |
-| `output.weight` | ada | ada | **tidak** |
-| `output_hc_norm.weight` | ada | **tidak** | **tidak** |
+| `token_embd.weight` | present | present | **absent** |
+| `output.weight` | present | present | **absent** |
+| `output_hc_norm.weight` | present | **absent** | **absent** |
 
-Upstream memperlakukan draft model sebagai model `qwen4exp` utuh dan mewajibkan set
-tensor lengkap (`LLM_TENSOR_HC_HEAD_NORM` terdaftar di `llama-arch.cpp:522`). Head
-Unsloth dibuat untuk fork `unslothai/llama.cpp` yang tahu ini head parsial.
+Upstream treats the draft model as a complete `qwen4exp` model and requires the full
+tensor set (`LLM_TENSOR_HC_HEAD_NORM` is registered at `llama-arch.cpp:522`). The Unsloth
+head is built for the `unslothai/llama.cpp` fork, which knows it is a partial head.
 
-**Jalan yang tersisa untuk MTP:**
-1. Build fork `unslothai/llama.cpp` tag `b10715-mix-86bd2d3` atau lebih baru.
-2. Tunggu PR #27836 merge — masih berstatus draft, plus butuh commit detached-head
-   loader `crusaderky` a82a58a.
-3. Tambahkan `output_hc_norm.weight` ke GGUF head sendiri (patch tensor) — belum diuji,
-   dan belum tentu cukup karena mungkin ada tensor wajib lain.
+**Remaining paths to MTP:**
+1. Build the `unslothai/llama.cpp` fork at tag `b10715-mix-86bd2d3` or newer.
+2. Wait for PR #27836 to merge — still in draft status, plus it needs `crusaderky`'s
+   detached-head loader commit a82a58a.
+3. Add `output_hc_norm.weight` to the head GGUF ourselves (tensor patch) — untested,
+   and not necessarily sufficient since there may be other required tensors.
 
-## Status memori (terukur, bukan estimasi)
+## Memory status (measured, not estimated)
 
-Dengan default `--load-mode auto` (yang ternyata sudah mmap):
+With the default `--load-mode auto` (which turns out to already be mmap):
 
-- used saat model ter-load: **83.4-84.3 GiB**, bukan ~104 GiB seperti dugaan awal
+- used with the model loaded: **83.4-84.3 GiB**, not ~104 GiB as first assumed
 - page cache: ~24 GiB
-- available tersisa: ~35 GiB
-- load time: **44.5 detik** (warm)
+- available left: ~35 GiB
+- load time: **44.5 seconds** (warm)
 
-Klaim bahwa `-lm mmap` akan menurunkan resident 104 → 77 GiB **tidak relevan** — default
-sudah mmap. Manfaat tambahan flag itu belum terukur.
+The claim that `-lm mmap` would drop resident from 104 → 77 GiB is **irrelevant** — the default
+is already mmap. Any additional benefit from that flag is unmeasured.
 
-## Kesimpulan yang bertahan
+## Conclusions that survive
 
-Yang masih berdiri dari analisis awal: **decode dibatasi memory bandwidth**. Efisiensi
-jujur 57% dari roofline 41.4 tok/s. Tapi tidak ada jalur murah untuk menaikkannya —
-update build nol, ngram nol, MTP terblokir. Yang tersisa nyata:
+What still stands from the initial analysis: **decode is memory-bandwidth bound**. The honest
+efficiency is 57% of a 41.4 tok/s roofline. But there is no cheap path to raise it —
+build update zero, ngram zero, MTP blocked. What genuinely remains:
 
-1. **Fork unslothai** untuk MTP — satu-satunya jalur yang punya bukti angka di hardware
-   sekelas (Strix Halo 20.3 → 35.8).
-2. **blazux NVFP4 + vLLM** — 31 tok/s hybrid, prefill 20-40× lebih cepat. Stack berbeda.
-3. **Terima 23.7 tok/s** dengan retensi 92.3%.
+1. **The unslothai fork** for MTP — the only path with actual numbers on comparable
+   hardware (Strix Halo 20.3 → 35.8).
+2. **blazux NVFP4 + vLLM** — 31 tok/s hybrid, prefill 20-40× faster. A different stack.
+3. **Accept 23.7 tok/s** with 92.3% retention.
 
 ---
 
-# Hasil fork Unsloth + beban kerja coding agent (2026-09-03, sesi lanjutan)
+# Unsloth fork results + coding-agent workload (2026-09-03, follow-up session)
 
-Workload sebenarnya: **coding agent dengan prompt panjang**. `bench.sh` (prosa, prompt ~30
-token) tidak representatif untuk itu, jadi dibuat `bench-code.sh`: prompt ~10.9K token dari
-source `llama.cpp` nyata + task coding, 3 file & 3 task berbeda per run.
+The real workload: **a coding agent with long prompts**. `bench.sh` (prose, ~30-token
+prompts) is not representative of that, so `bench-code.sh` was written: ~10.9K-token prompts from
+real `llama.cpp` source + a coding task, 3 different files & 3 different tasks per run.
 
-Fork Unsloth dipakai lewat **prebuilt** `app-b10715-mix-86bd2d3-linux-arm64-cuda13-portable`
-(180 MB, tanpa compile) — `BUILD=fork ./serve.sh`.
+The Unsloth fork is used via the **prebuilt** `app-b10715-mix-86bd2d3-linux-arm64-cuda13-portable`
+(180 MB, no compile) — `BUILD=fork ./serve.sh`.
 
-## MTP BERHASIL di fork
+## MTP WORKS on the fork
 
-Prompt 10.886 token, output 256 token, median dari 3 run:
+Prompt 10,886 tokens, output 256 tokens, median of 3 runs:
 
-| Konfigurasi | Prefill tok/s | TTFT | Decode tok/s | Acceptance | RAM |
+| Configuration | Prefill tok/s | TTFT | Decode tok/s | Acceptance | RAM |
 |---|---|---|---|---|---|
 | upstream `0ba6499` | 337.8 | 33.1s | 22.11 | — | 84.3 GiB |
 | fork `b10715` | **525.3** | **20.8s** | 24.07 | — | 84.3 GiB |
 | fork + MTP n-max 2 | 505.6 | 21.7s | **36.45** | **94.3%** | 88.8 GiB |
 | fork + MTP n-max 3 | 505.7 | 21.7s | **37.81** | 92.8% | 89.1 GiB |
 
-**Dua kemenangan terpisah:**
+**Two separate wins:**
 
-1. **MTP: decode 24.07 → 37.81 tok/s (+57%)**, acceptance **92–94%** di kode. Ini jauh di atas
-   ekspektasi dari data Strix Halo (0.90 di kode) dan menjelaskan kenapa uji prosa kemarin
-   menyesatkan — prosa adalah kasus terburuk untuk MTP, kode kasus terbaik. Lossless: draft
-   yang salah ditolak, output identik dengan non-spec.
-2. **Fork lebih cepat prefill: 337.8 → 525.3 tok/s (+55%)**, TTFT 33.1s → 20.8s, bahkan tanpa
-   MTP. Ini tidak terduga dan bukan efek MTP.
+1. **MTP: decode 24.07 → 37.81 tok/s (+57%)**, acceptance **92–94%** on code. That is far above
+   the expectation from the Strix Halo data (0.90 on code) and explains why yesterday's prose test
+   was misleading — prose is the worst case for MTP, code the best case. Lossless: wrong
+   drafts are rejected, output identical to non-spec.
+2. **The fork prefills faster: 337.8 → 525.3 tok/s (+55%)**, TTFT 33.1s → 20.8s, even without
+   MTP. This was unexpected and is not an MTP effect.
 
-Biaya MTP: **+4.5 GiB** RAM (84.3 → 88.8 GiB) untuk head Q8_0.
+MTP's cost: **+4.5 GiB** RAM (84.3 → 88.8 GiB) for the Q8_0 head.
 
-## End-to-end untuk satu panggilan agent
+## End-to-end for a single agent call
 
-| Konfigurasi | TTFT | Decode | Total | Porsi prefill |
+| Configuration | TTFT | Decode | Total | Prefill share |
 |---|---|---|---|---|
 | upstream | 33.1s | 11.6s | **44.7s** | 74% |
 | fork | 20.8s | 10.6s | 31.5s | 66% |
 | fork + MTP n3 | 21.7s | 6.8s | **28.5s** | **76%** |
 
-**Perbaikan end-to-end 44.7s → 28.5s (+57%).** Konfigurasi yang direkomendasikan:
+**End-to-end improvement 44.7s → 28.5s (+57%).** The recommended configuration:
 `BUILD=fork ./serve.sh --mtp --nmax 3`.
 
-## Tapi prefill tetap masalah dominan
+## But prefill remains the dominant problem
 
-Setelah MTP, **76% waktu per panggilan habis di prefill**. Decode sudah bukan bottleneck.
-Untuk coding agent, ini yang menentukan pengalaman pakai:
+After MTP, **76% of the time per call goes to prefill**. Decode is no longer the bottleneck.
+For a coding agent, this is what determines how it feels to use:
 
 - prompt 10.9K → TTFT ~21s
-- prompt 32K → TTFT ~63s `[estimate]`, ekstrapolasi linear dari 505 tok/s
+- prompt 32K → TTFT ~63s `[estimate]`, linear extrapolation from 505 tok/s
 
-blazux NVFP4+vLLM mengklaim prefill **1.500–2.000 tok/s** (3–4× fork ini) plus prefix caching
-dengan TTFT 1.4s untuk 20K token yang sudah pernah dilihat. Untuk agent yang memanggil
-berulang dengan konteks yang tumbuh, prefix caching itu bisa lebih besar dampaknya daripada
-angka prefill mentah.
+blazux NVFP4+vLLM claims prefill of **1,500–2,000 tok/s** (3–4× this fork) plus prefix caching
+with TTFT 1.4s for 20K tokens it has already seen. For an agent that calls repeatedly
+with a growing context, that prefix caching could matter more than the raw
+prefill number.
 
-**Rekomendasi bertingkat:**
-1. **Sekarang:** pakai `BUILD=fork ./serve.sh --mtp --nmax 3`. Gratis, sudah terukur, +57%.
-2. **Berikutnya:** evaluasi blazux vLLM khusus untuk prefill + prefix caching. Butuh download
-   bobot NVFP4 ~122 GiB (konfirmasi dulu) dan retensi akurasi NVFP4 belum terukur pihak ketiga.
-3. Konsekuensi memakai fork: tertinggal dari upstream, bergantung rilis Unsloth. Untuk sekarang
-   sepadan — upstream tidak bisa memuat MTP head sama sekali.
+**Tiered recommendation:**
+1. **Now:** use `BUILD=fork ./serve.sh --mtp --nmax 3`. Free, already measured, +57%.
+2. **Next:** evaluate blazux vLLM specifically for prefill + prefix caching. Requires downloading
+   ~122 GiB of NVFP4 weights (confirm first) and NVFP4 accuracy retention has not been measured by a third party.
+3. Consequence of using the fork: behind upstream, dependent on Unsloth releases. For now
+   it is worth it — upstream cannot load the MTP head at all.
 
 ---
 
-# Perbandingan final: llama.cpp fork+MTP vs vLLM NVFP4 (2026-09-03 malam)
+# Final comparison: llama.cpp fork+MTP vs vLLM NVFP4 (2026-09-03 evening)
 
-Diukur dari sisi klien lewat streaming SSE untuk kedua stack (`bench-stream.py`), prompt
-identik ~10.9K token dari source nyata, 256 token output, `finish_reason=length` di semua
-run. Jumlah token diambil dari `usage.completion_tokens` yang dilaporkan server.
+Measured from the client side over streaming SSE for both stacks (`bench-stream.py`), identical
+~10.9K-token prompts from real source, 256 tokens of output, `finish_reason=length` in every
+run. Token counts taken from the `usage.completion_tokens` reported by the server.
 
-## Hasil
+## Results
 
-| Stack | TTFT | Decode | Total/panggilan | RAM | Load |
+| Stack | TTFT | Decode | Total/call | RAM | Load |
 |---|---|---|---|---|---|
 | llama.cpp fork+MTP n3 | 21.59s | **37.77** | 28.4s | **88 GiB** | **45s** |
-| vLLM NVFP4 | **11.30s** | 30.27 | **19.8s** | 112 GiB | 14 mnt |
+| vLLM NVFP4 | **11.30s** | 30.27 | **19.8s** | 112 GiB | 14 min |
 | llama.cpp — prefix cache hit | 1.82s | 35.83 | **9.0s** | | |
 | vLLM — prefix cache hit | 1.86s | 30.71 | 10.2s | | |
 
-- **Cold** (konteks baru tiap panggilan): vLLM **1.44× lebih cepat** — prefill 1.9× menutupi
-  decode yang 1.25× lebih lambat.
-- **Warm** (prefix sama): llama.cpp **1.14× lebih cepat**, dan **prefix caching keduanya
-  praktis setara (1.82s vs 1.86s)**.
-- **Titik impas: vLLM menang bila >12% panggilan bersifat cold.**
+- **Cold** (a new context every call): vLLM is **1.44× faster** — a 1.9× prefill covers
+  a decode that is 1.25× slower.
+- **Warm** (same prefix): llama.cpp is **1.14× faster**, and **prefix caching is
+  practically equal on both (1.82s vs 1.86s)**.
+- **Break-even: vLLM wins when >12% of calls are cold.**
 
-## Koreksi: prefix caching BUKAN keunggulan khas vLLM
+## Correction: prefix caching is NOT a vLLM-specific advantage
 
-Sepanjang riset ini aku memperlakukan prefix caching sebagai alasan utama pindah ke vLLM,
-mengutip klaim blazux "TTFT 1.4s untuk 20K token". Terukur: **llama.cpp punya kemampuan yang
-sama dan sama cepatnya** (1.82s vs 1.86s pada prompt 10.9K). Argumen pindah stack karena
-prefix caching tidak berdiri.
+Throughout this research I treated prefix caching as the main reason to move to vLLM,
+citing the blazux claim of "TTFT 1.4s for 20K tokens". Measured: **llama.cpp has the same
+capability and is just as fast** (1.82s vs 1.86s on a 10.9K prompt). The argument for switching stacks because of
+prefix caching does not hold.
 
-## Tiga cacat metodologi yang ditemukan hari ini
+## Three methodological flaws found today
 
-Semuanya menghasilkan angka yang tampak masuk akal padahal mengukur hal lain:
+All of them produced numbers that looked plausible while measuring something else:
 
-1. **Prompt berulang + temperature 0** → inflasi 14.6% tanpa spekulasi, 263% dengan ngram-mod.
-2. **`"model": "x"`** → vLLM balas HTTP 404 (llama.cpp mengabaikan field ini). Nama model kini
-   dibaca dari `/v1/models`.
-3. **Menghitung chunk SSE sebagai token** → vLLM mengemas ~2.6 token per chunk, membuat decode
-   tampak 9.7 tok/s padahal 30.3. Kini memakai `usage.completion_tokens`.
+1. **Repeated prompt + temperature 0** → 14.6% inflation without speculation, 263% with ngram-mod.
+2. **`"model": "x"`** → vLLM replies HTTP 404 (llama.cpp ignores this field). The model name is now
+   read from `/v1/models`.
+3. **Counting SSE chunks as tokens** → vLLM packs ~2.6 tokens per chunk, making decode
+   look like 9.7 tok/s when it was 30.3. Now uses `usage.completion_tokens`.
 
-Ditambah: request pertama setelah server start kadang gagal/kosong dan ikut masuk median.
-`bench-stream.py` sekarang membuang satu run warm-up dan menolak run gagal secara eksplisit.
+Plus: the first request after server start sometimes fails/comes back empty and was included in the median.
+`bench-stream.py` now discards one warm-up run and rejects failed runs explicitly.
 
-## Rekomendasi: tetap di llama.cpp fork + MTP
+## Recommendation: stay on llama.cpp fork + MTP
 
 ```bash
 BUILD=fork ./serve.sh --mtp --nmax 3
 ```
 
-vLLM unggul 1.44× hanya pada panggilan cold. Untuk coding agent dengan system prompt stabil
-dan konteks yang bertumbuh di ujung, mayoritas panggilan adalah cache hit — wilayah di mana
-llama.cpp justru sedikit lebih cepat. Di luar kecepatan:
+vLLM's 1.44× advantage applies only to cold calls. For a coding agent with a stable system prompt
+and a context that grows at the end, the majority of calls are cache hits — the region where
+llama.cpp is in fact slightly faster. Beyond speed:
 
 | | llama.cpp fork | vLLM NVFP4 |
 |---|---|---|
-| RAM | 88 GiB (sisa 33) | 112 GiB (sisa ~8) |
-| Restart | 45 detik | 14 menit |
-| Retensi akurasi (diukur, thinking off) | GSM8K 97.3%, HumanEval+ 93.9% | GSM8K 97.0%, HumanEval+ 95.7% |
-| Stack | satu binary | docker + vLLM patched |
+| RAM | 88 GiB (33 left) | 112 GiB (~8 left) |
+| Restart | 45 seconds | 14 minutes |
+| Accuracy retention (measured, thinking off) | GSM8K 97.3%, HumanEval+ 93.9% | GSM8K 97.0%, HumanEval+ 95.7% |
+| Stack | a single binary | docker + patched vLLM |
 
-Margin memori vLLM (~8 GiB) berbahaya di mesin ini mengingat insiden watchdog 2026-09-01.
+vLLM's memory margin (~8 GiB) is dangerous on this machine given the 2026-09-01 watchdog incident.
 
-**Pindah ke vLLM baru masuk akal kalau** beban kerjanya ternyata didominasi konteks yang
-selalu baru (>12% cold), misalnya memindai banyak file berbeda tiap panggilan. Itu bisa
-diukur dari pola pemakaian nyata, bukan ditebak sekarang: `./cache-ratio.py -v` membaca
-`runs/serve-current.log` setelah sesi nyata dan melaporkan rasio cold call terhadap titik
-impas ini. Log benchmark sengaja 100% cold (prompt berbeda tiap run), jadi tidak mewakili.
-**Sudah diukur 2026-09-05** (bagian paling bawah): 8.7% cold, 95.9% token dari cache.
+**Moving to vLLM only makes sense if** the workload turns out to be dominated by always-new
+context (>12% cold), e.g. scanning many different files each call. That can be
+measured from real usage patterns, not guessed now: `./cache-ratio.py -v` reads
+`runs/serve-current.log` after a real session and reports the ratio of cold calls against this
+break-even point. The benchmark log is deliberately 100% cold (a different prompt every run), so it is not representative.
+**Measured 2026-09-05** (bottom-most section): 8.7% cold, 95.9% of tokens from cache.
 
 ---
 
-## 2026-09-04: Crash CUDA saat prefill — fork DAN upstream, mitigasi `-ub 256`
+## 2026-09-04: CUDA crash during prefill — fork AND upstream, mitigated with `-ub 256`
 
-Ditemukan saat menjalankan `bench-accuracy.py` (HumanEval+): llama-server mati di soal
-`HumanEval/68` dengan
+Found while running `bench-accuracy.py` (HumanEval+): llama-server died on problem
+`HumanEval/68` with
 
 ```
 CUDA error: an internal operation failed
   in function ggml_cuda_mul_mat_cublas_impl at ggml-cuda.cu:1623 (cublasGemmEx)
 ```
 
-Reproduksi deterministik: server baru start, satu request prompt itu (381 token prompt,
-thinking off), mati dalam 1 detik. Bukan OOM — available 116 GiB saat itu.
+Deterministic reproduction: freshly started server, one request with that prompt (381 prompt tokens,
+thinking off), dead within 1 second. Not OOM — 116 GiB available at the time.
 
-**Isolasi** (`runs/crash-sweep-2026-09-04.jsonl`, log crash di `runs/serve-crash-*.log`):
+**Isolation** (`runs/crash-sweep-2026-09-04.jsonl`, crash logs in `runs/serve-crash-*.log`):
 
-| Konfigurasi | Prompt HumanEval/68 |
+| Configuration | Prompt HumanEval/68 |
 |---|---|
-| fork Unsloth b10715 + MTP | crash |
-| fork Unsloth b10715 tanpa MTP | crash |
+| Unsloth fork b10715 + MTP | crash |
+| Unsloth fork b10715 without MTP | crash |
 | upstream `0ba6499` (build-new) `--ngram-mod` | crash |
-| fork + MTP, **`-ub 256`** | **jalan** (474 token completion) |
+| fork + MTP, **`-ub 256`** | **runs** (474-token completion) |
 
-Jadi bukan MTP dan bukan fork — bug backend CUDA llama.cpp di GB10 (sm_121), ada di
-upstream juga. Sweep prompt netral (token id mentah lewat `/completion`, `cache_prompt`
-off) ukuran 300–600 pada `-ub` default: hanya **367 dan 512** yang crash; tapi 381 netral
-*tidak* crash padahal prompt HumanEval/68 (381 token) crash. Pemicunya **bergantung data,
-bukan sekadar ukuran batch** — `[Inferensi]` bentuk GEMM per-expert (berapa token yang
-dirutekan ke tiap expert dalam satu ubatch) yang menabrak jalur cuBLAS bermasalah.
+So it is neither MTP nor the fork — a llama.cpp CUDA backend bug on GB10 (sm_121), present in
+upstream too. A neutral prompt sweep (raw token ids via `/completion`, `cache_prompt`
+off) of sizes 300–600 at the default `-ub`: only **367 and 512** crash; but a neutral 381
+does *not* crash even though the HumanEval/68 prompt (381 tokens) does. The trigger is **data-dependent,
+not merely batch size** — `[Inference]` the per-expert GEMM shape (how many tokens are
+routed to each expert within one ubatch) hitting the problematic cuBLAS path.
 
-**Mitigasi:** `-ub 256`. Dengan itu sweep 1–600 bersih dan HumanEval/68 jalan. Sekarang
-default di `stack.sh` (`UBATCH=256`, bisa di-override). Ini menghindari semua kasus yang
-bisa kami reproduksi, bukan jaminan — akar masalahnya belum diperbaiki di upstream.
-Kenapa ini tidak pernah muncul di benchmark 2026-09-03: prompt ~10.9K token diproses
-dalam ubatch 2048/512 penuh; hanya ubatch terakhir yang berukuran acak, dan tiga prompt
-tidak cukup untuk menabraknya. Coding agent yang mengirim ratusan prompt beragam **akan**
-menabraknya cepat atau lambat — 468 request eval menabraknya di request ke-369.
+**Mitigation:** `-ub 256`. With it, the 1–600 sweep is clean and HumanEval/68 runs. It is now the
+default in `stack.sh` (`UBATCH=256`, overridable). This avoids every case we could
+reproduce, not a guarantee — the root cause is not fixed upstream.
+Why this never showed up in the 2026-09-03 benchmark: the ~10.9K-token prompts are processed
+in full 2048/512 ubatches; only the last ubatch has a random size, and three prompts
+were not enough to hit it. A coding agent sending hundreds of varied prompts **will**
+hit it sooner or later — 468 eval requests hit it on request 369.
 
-**2026-09-06, kernel yang sebenarnya gagal: `MUL_MAT_ID`, bukan cuBLAS.** Diuji ulang pada `-ub 512`
-dengan probe token mentah ukuran 367 (`runs/crash-sweep-2026-09-04.jsonl`, entri 2026-09-06):
-`GGML_CUDA_CUBLAS_COMPUTE_TYPE` f32 / bf16 / f16 semuanya crash di ukuran yang sama, dan kali ini
-error-nya "illegal memory access" yang muncul di `launch_mul_mat_q`, bukan "internal operation
-failed" di `cublasGemmEx` seperti tanggal 4. Error CUDA jenis ini asinkron, lokasi yang dilaporkan
-adalah panggilan berikutnya yang kebetulan memeriksa status, jadi kedua laporan itu tidak menunjuk
-kernel yang salah. Dengan `CUDA_LAUNCH_BLOCKING=1` (error jadi sinkron) pelakunya terbaca pasti:
+**2026-09-06, the kernel that actually fails: `MUL_MAT_ID`, not cuBLAS.** Retested at `-ub 512`
+with a raw-token probe of size 367 (`runs/crash-sweep-2026-09-04.jsonl`, the 2026-09-06 entry):
+`GGML_CUDA_CUBLAS_COMPUTE_TYPE` f32 / bf16 / f16 all crash at the same size, and this time
+the error is "illegal memory access" surfacing in `launch_mul_mat_q`, not "internal operation
+failed" in `cublasGemmEx` as on the 4th. CUDA errors of this kind are asynchronous, and the reported location
+is the next call that happens to check status, so neither report points at the
+faulty kernel. With `CUDA_LAUNCH_BLOCKING=1` (errors become synchronous) the culprit reads out unambiguously:
 
 ```
 ggml_cuda_compute_forward: MUL_MAT_ID failed
 CUDA error: an illegal memory access was encountered
 ```
 
-`MUL_MAT_ID` = matmul expert MoE lewat kernel MMQ ggml (Q4_K experts). Ini persis
-**ggml-org/llama.cpp#27792** (masih OPEN): tail padding buffer `src1_q8_1` di jalur `mul_mat_id`
-dihitung dari `ne11` yang selalu 1 untuk MoE, sehingga tile terakhir expert terakhir membaca lewat
-akhir alokasi; terlihat atau tidak bergantung slack pool VMM, karena itu hanya ukuran ubatch
-tertentu (367, 512) dan bergantung data (routing expert). Fix-nya sudah ada sebagai PR
-**#27044** ("size MMQ ids-path tail padding from the flattened row count") — dibuka 2026-08-13,
-belum di-merge. Laporan #28377 kami dengan demikian duplikat dari #27792 dengan gejala yang
-lokasinya menyesatkan. Konsekuensi: `GGML_CUDA_FORCE_MMQ` justru jalur yang salah;
-`GGML_CUDA_FORCE_CUBLAS` (compile-time) atau patch #27044 di build sendiri yang akan menghindarinya.
-Prebuilt Unsloth yang lebih baru (`b10798-mix-659e406`, 2026-09-04) diuji di bawah.
+`MUL_MAT_ID` = the MoE expert matmul via ggml's MMQ kernel (Q4_K experts). This is exactly
+**ggml-org/llama.cpp#27792** (still OPEN): the tail padding of the `src1_q8_1` buffer in the `mul_mat_id` path
+is computed from `ne11`, which is always 1 for MoE, so the last tile of the last expert reads past
+the end of the allocation; whether it is visible or not depends on VMM pool slack, which is why only certain
+ubatch sizes (367, 512) and why it is data-dependent (expert routing). The fix already exists as PR
+**#27044** ("size MMQ ids-path tail padding from the flattened row count") — opened 2026-08-13,
+not yet merged. Our report #28377 is therefore a duplicate of #27792 with a symptom whose
+location is misleading. Consequence: `GGML_CUDA_FORCE_MMQ` is in fact the wrong path;
+`GGML_CUDA_FORCE_CUBLAS` (compile-time) or the #27044 patch in a self-built binary is what avoids it.
+A newer Unsloth prebuilt (`b10798-mix-659e406`, 2026-09-04) is tested below.
 
-Dilaporkan ke upstream sebagai **ggml-org/llama.cpp#28377** (2026-09-04) dengan reproduksi
-sweep di atas. Kandidat terkait: #28251 (call site sama, `cublasGemmEx` di jalur MoE, status
-cuBLAS berbeda, RTX 3070) dan #27792 (OOB read di MMQ `mul_mat_id`, jalur kernel berbeda
-tapi sama-sama bergantung ubatch) `[Spekulasi]`.
+Reported upstream as **ggml-org/llama.cpp#28377** (2026-09-04) with the sweep reproduction
+above. Related candidates: #28251 (same call site, `cublasGemmEx` in the MoE path, different cuBLAS
+status, RTX 3070) and #27792 (OOB read in MMQ `mul_mat_id`, a different kernel path
+but likewise ubatch-dependent) `[Speculation]`.
 
-**Biaya `-ub 256`** (`runs/bench-stream2.jsonl`, label `llamacpp-mtp-ub256` vs `-ub512`,
-prompt ~10.9K token, median 2 run valid): TTFT **26.2 s vs 21.9 s** (+20% prefill),
-decode 36.7 vs 37.2 tok/s (setara). Prefill memang menjadi lebih mahal; itu harga
-stabilitas sampai upstream memperbaiki kernelnya. Catatan: run ke-4 (sumber
-`speculative.cpp`) gagal di kedua konfigurasi — server mengembalikan 1 token lalu stop.
-Prompt yang sama jalan normal di vLLM pada 2026-09-03. Belum diselidiki `[Belum Terverifikasi]`.
+**The cost of `-ub 256`** (`runs/bench-stream2.jsonl`, labels `llamacpp-mtp-ub256` vs `-ub512`,
+~10.9K-token prompts, median of 2 valid runs): TTFT **26.2 s vs 21.9 s** (+20% prefill),
+decode 36.7 vs 37.2 tok/s (equivalent). Prefill does get more expensive; that is the price of
+stability until upstream fixes the kernel. Note: run 4 (source
+`speculative.cpp`) failed on both configurations — the server returned 1 token then stopped.
+The same prompt ran normally on vLLM on 2026-09-03. Not yet investigated `[Unverified]`.
 
 ---
 
-## 2026-09-04: Retensi akurasi — diukur, bukan dari model card
+## 2026-09-04: Accuracy retention — measured, not from the model card
 
-Pertanyaan yang tersisa dari perbandingan backend: apakah NVFP4 (RadixArk) lebih buruk dari
-UD-Q4_K_XL (Unsloth)? BF16 360 GB tidak muat di GB10, jadi yang diukur adalah **kedua quant
-pada task set, harness, dan setting decoding yang identik**, lalu dibandingkan satu sama lain
-dan dengan angka BF16 yang dipublikasikan. Alat: `bench-accuracy.py`; data:
-`runs/accuracy-2026-09-04.jsonl`; sampel per soal di `tmp/accuracy/<label>/` (tidak di-track).
+The question left over from the backend comparison: is NVFP4 (RadixArk) worse than
+UD-Q4_K_XL (Unsloth)? BF16 360 GB does not fit on GB10, so what was measured is **both quants
+on an identical task set, harness and decoding settings**, then compared against each other
+and against published BF16 numbers. Tool: `bench-accuracy.py`; data:
+`runs/accuracy-2026-09-04.jsonl`; per-problem samples in `tmp/accuracy/<label>/` (not tracked).
 
-Setting: thinking **off** (`chat_template_kwargs.enable_thinking=false`, kedua server
-menghormatinya — 27 prompt token identik), temperature 0, seed 1234. GSM8K: lm-eval
-`gsm8k_cot_zeroshot`, 300 soal test pertama, max 1024 token. HumanEval+: evalplus, 164 soal,
-greedy, max 2048 token (default 768 memotong dua jawaban yang menalar panjang dulu).
+Settings: thinking **off** (`chat_template_kwargs.enable_thinking=false`, both servers
+honour it — 27 identical prompt tokens), temperature 0, seed 1234. GSM8K: lm-eval
+`gsm8k_cot_zeroshot`, first 300 test problems, max 1024 tokens. HumanEval+: evalplus, 164 problems,
+greedy, max 2048 tokens (the default 768 truncated two answers that reason at length first).
 
 | | llama.cpp UD-Q4_K_XL + MTP | vLLM NVFP4 (RadixArk) | BF16 published |
 |---|---|---|---|
@@ -530,568 +530,581 @@ greedy, max 2048 token (default 768 memotong dua jawaban yang menalar panjang du
 | HumanEval+ pass@1 base | 96.3% (158/164) | 97.0% (159/164) | — |
 | HumanEval+ pass@1 plus | **93.9%** (154/164) | **95.7%** (157/164) | — |
 
-stderr GSM8K ≈ 2.0 poin; HumanEval+ ≈ 1.9 poin. **Kesimpulan: kedua quant setara dalam
-batas noise.** Bukti yang lebih kuat dari angka agregatnya adalah *soal mana* yang gagal:
+GSM8K stderr ≈ 2.0 points; HumanEval+ ≈ 1.9 points. **Conclusion: the two quants are equivalent within
+noise.** Stronger evidence than the aggregate numbers is *which problems* failed:
 
-- GSM8K: 7 soal gagal di keduanya; llama.cpp gagal 1 soal tambahan, vLLM 2. Sisa kegagalan
-  adalah batas model (mis. 36.36 vs 36, pembulatan), bukan efek quant.
-- HumanEval+: 7 soal gagal di keduanya; **set kegagalan vLLM adalah subset ketat** dari
-  llama.cpp, yang gagal 3 soal tambahan (38, 116, 124). Selisih 1.8 poin, di dalam stderr,
-  tapi arahnya konsisten: NVFP4 tidak lebih buruk, kalau ada malah sedikit lebih baik.
+- GSM8K: 7 problems fail on both; llama.cpp fails 1 additional problem, vLLM 2. The remaining failures
+  are model limits (e.g. 36.36 vs 36, rounding), not a quant effect.
+- HumanEval+: 7 problems fail on both; **vLLM's failure set is a strict subset** of
+  llama.cpp's, which fails 3 additional problems (38, 116, 124). A 1.8-point gap, within stderr,
+  but the direction is consistent: NVFP4 is not worse, if anything slightly better.
 
-Baris tabel perbandingan backend di atas ("belum terukur") sudah dikoreksi. Angka 92.3%
-Unsloth tidak sebanding dengan ini (metrik "top-1% accuracy" vs BF16, bukan task score).
+The backend comparison table row above ("not yet measured") has been corrected. Unsloth's 92.3%
+figure is not comparable to these (a "top-1% accuracy" metric vs BF16, not a task score).
 
-**Dua cacat harness yang ditemukan dan diperbaiki** (lanjutan daftar cacat 2026-09-03):
+**Two harness flaws found and fixed** (continuing the flaw list from 2026-09-03):
 
-4. lm-eval `flexible-extract` mengambil angka *terakhir* di respons. Model ini menutup dengan
-   "Kylar needs to pay **$64** for the 16 glasses" → terbaca 16. Juga `$26.00` ≠ `26`. Dari 48
-   "kegagalan" versi lm-eval, 37 adalah jawaban benar. Scorer `acc_final_para` (angka
-   terakhir di paragraf terakhir, angka tebal diutamakan) memperbaikinya tanpa satu pun
-   verdict benar berubah jadi salah. Kedua angka disimpan; baca yang final-paragraph.
-5. llama.cpp + MTP dengan 4 slot paralel: 96.3% vs 97.3% dengan 1 slot, dan satu respons
-   berhenti setelah 5 karakter ("Let $"). Cocok dengan gejala upstream #28286 (kontaminasi
-   antar slot dengan draft-mtp). Hasil resmi memakai 1 slot; vLLM boleh 4 paralel.
+4. lm-eval `flexible-extract` takes the *last* number in the response. This model closes with
+   "Kylar needs to pay **$64** for the 16 glasses" → read as 16. Also `$26.00` ≠ `26`. Of the 48
+   lm-eval "failures", 37 were correct answers. The `acc_final_para` scorer (last number
+   in the last paragraph, bold numbers preferred) fixes it without turning a single correct
+   verdict into a wrong one. Both numbers are stored; read the final-paragraph one.
+5. llama.cpp + MTP with 4 parallel slots: 96.3% vs 97.3% with 1 slot, and one response
+   stopped after 5 characters ("Let $"). Matches the symptoms of upstream #28286 (cross-slot
+   contamination with draft-mtp). The official result uses 1 slot; vLLM may use 4 in parallel.
 
 ---
 
-## 2026-09-05: Rasio cache hit nyata — sesi coding agent pertama
+## 2026-09-05: Real cache hit ratio — first coding agent session
 
-Angka yang sebelumnya kosong di bagian Rekomendasi. Sumber: `runs/cache-ratio-2026-09-05.jsonl`
-(23 request, direkonstruksi dari log llama-server oleh `cache-ratio.py`; kolom
-`draft_acceptance` ditambahkan dari baris `print_timing` yang sama). Beban: dua sesi Pi dari
-laptop lewat port-forward NVIDIA Sync — satu one-shot "mini spreadsheet" (satu file HTML,
-parser formula + dependency graph) lalu satu sesi follow-up (fix bug + fitur baru) di file yang
-sama. Model menulis kode, menjalankan test Node, memperbaiki test-nya sendiri; total 23 request,
-konteks tumbuh dari 1.6k ke 40k token.
+The number that was previously blank in the Recommendation section. Source:
+`runs/cache-ratio-2026-09-05.jsonl` (23 requests, reconstructed from the llama-server log by
+`cache-ratio.py`; the `draft_acceptance` column added from the same `print_timing` lines). Load: two
+Pi sessions from a laptop over an NVIDIA Sync port-forward — one one-shot "mini spreadsheet" (a
+single HTML file, formula parser + dependency graph) then a follow-up session (bug fix + new
+feature) on the same file. The model wrote code, ran Node tests, fixed its own tests; 23 requests
+total, context grew from 1.6k to 40k tokens.
 
-| | Nilai |
+| | Value |
 |---|---|
 | Prompt tokens total / cached | 606 854 / 582 177 (**95.9%**) |
-| Cold call (cached < 50%) | **2 / 23 = 8.7%** — di bawah titik impas 12% |
-| Prefill wall total | 66.0 s, 2.87 s per call; **37.1 s** di antaranya satu call |
-| Prefill per call kalau call itu dikecualikan | ~1.3 s (22 call, 29 s) |
-| Completion tokens total / decode wall | 35 461 / 1076 s → **33.0 tok/s** agregat |
-| Decode per call | 26.6–38.5 tok/s; ≥30k konteks cenderung 27–30 |
-| Draft acceptance MTP agregat | 0.856 (20 670 / 24 145), per call 0.78–0.99 |
+| Cold calls (cached < 50%) | **2 / 23 = 8.7%** — below the 12% break-even point |
+| Prefill wall total | 66.0 s, 2.87 s per call; **37.1 s** of that in a single call |
+| Prefill per call if that call is excluded | ~1.3 s (22 calls, 29 s) |
+| Completion tokens total / decode wall | 35 461 / 1076 s → **33.0 tok/s** aggregate |
+| Decode per call | 26.6–38.5 tok/s; ≥30k context tends toward 27–30 |
+| Aggregate MTP draft acceptance | 0.856 (20 670 / 24 145), 0.78–0.99 per call |
 
-**Kesimpulan:** pola pemakaian coding agent sungguhan jatuh di wilayah llama.cpp + MTP, seperti
-diasumsikan Rekomendasi. Sampel kecil (satu pengguna, dua sesi, satu jenis tugas), tapi arahnya
-jelas: 21 dari 23 call cache hit ≥ 82%, dan 17 di antaranya ≥ 98%.
+**Conclusion:** the usage pattern of a real coding agent falls in llama.cpp + MTP territory, just as
+the Recommendation assumed. Small sample (one user, two sessions, one kind of task), but the
+direction is clear: 21 of 23 calls hit ≥ 82% cache, and 17 of those ≥ 98%.
 
-**Dua cold call itu bukan yang diduga.** Yang pertama adalah probe awal (wajar). Yang kedua,
-task 6875, adalah **turn kedua** sesi pertama: prompt 18 364 token, hanya 1 988 cached, 16 376
-token di-prefill ulang selama 37 s. Ukuran yang di-prefill ulang hampir persis sama dengan
-respons sebelumnya (16 342 token, 456 s decode — respons one-shot berisi thinking panjang plus
-seluruh file). `[Inferensi]` Isi respons itu dikirim balik oleh Pi sebagai history, tapi
-prefix cache tidak match: kandidat penyebab (a) token hasil generate ≠ hasil re-tokenize teks
-yang sama, sehingga satu token beda di awal menggugurkan semua setelahnya, atau (b) chat
-template me-render ulang blok thinking dengan format yang berbeda dari yang di-generate. Mana
-yang benar belum diuji; setelah turn itu, semua turn berikutnya hit ≥ 90%, jadi cache-nya
-bekerja normal — miss ini hanya terjadi sekali per percakapan, tepat setelah respons pertama.
-Kalau pola ini konsisten, biaya sesi = satu prefill sebesar respons pertama; untuk respons
-pendek biayanya kecil, untuk one-shot 16k token seperti ini 37 s.
+**Those two cold calls are not the ones you would guess.** The first is the initial probe (expected).
+The second, task 6875, is the **second turn** of the first session: an 18 364-token prompt, only
+1 988 cached, 16 376 tokens re-prefilled over 37 s. The size that got re-prefilled is almost exactly
+the size of the previous response (16 342 tokens, 456 s decode — the one-shot response contained a
+long thinking block plus the whole file). `[Inference]` Pi sends the content of that response back as
+history, but the prefix cache does not match: candidate causes are (a) the generated tokens ≠ the
+result of re-tokenizing the same text, so one differing token at the start invalidates everything
+after it, or (b) the chat template re-renders the thinking block in a format different from the one
+that was generated. Which one is right has not been tested; after that turn, every subsequent turn
+hit ≥ 90%, so the cache works normally — this miss only happens once per conversation, right after
+the first response. If the pattern is consistent, the cost of a session = one prefill the size of the
+first response; for short responses the cost is small, for a 16k-token one-shot like this it is 37 s.
 
-**Dipersempit hari yang sama.** Dua sumber: capture traffic Pi di laptop (socat) dan
-`cache-probe.py` di server.
+**Narrowed down the same day.** Two sources: a capture of Pi traffic on the laptop (socat) and
+`cache-probe.py` on the server.
 
-*Client (capture socat, percakapan Pi 2 turn tanpa tool):* Pi **mengirim balik `reasoning_content`**
-(28 kemunculan di body request), dan turn 2-nya hit 99.0% (task 15198). Jadi hipotesis "Pi membuang
-thinking" GUGUR untuk turn teks biasa.
+*Client (socat capture, 2-turn Pi conversation without tools):* Pi **does send `reasoning_content`
+back** (28 occurrences in the request body), and its turn 2 hit 99.0% (task 15198). So the "Pi drops
+the thinking" hypothesis is REJECTED for ordinary text turns.
 
-*Server (`cache-probe.py`, `usage.prompt_tokens_details.cached_tokens` dibaca langsung, turn 2
-`max_tokens=1`):* setiap bentuk turn yang dikirim balik apa adanya **HIT**:
+*Server (`cache-probe.py`, `usage.prompt_tokens_details.cached_tokens` read directly, turn 2
+`max_tokens=1`):* every form of turn that is sent back as-is **HITs**:
 
-| Bentuk turn 1 | non-streaming | streaming (delta dirakit, arguments di-serialise ulang) |
+| Form of turn 1 | non-streaming | streaming (deltas reassembled, arguments re-serialised) |
 |---|---|---|
-| thinking + teks | HIT | HIT |
+| thinking + text | HIT | HIT |
 | thinking + tool call | HIT | HIT |
-| thinking + teks + tool call | HIT | HIT |
-| ... dengan tool call 3.6k token (file HTML) | HIT | HIT |
-| thinking panjang (puzzle) + tool call | — | HIT |
+| thinking + text + tool call | HIT | HIT |
+| ... with a 3.6k-token tool call (HTML file) | HIT | HIT |
+| long thinking (puzzle) + tool call | — | HIT |
 
-Dan diff token history yang di-render ulang vs token yang di-generate: **identik** untuk semua bentuk.
-Yang memecah cache hanya tiga hal (diff deterministik via `/apply-template`): `reasoning_content`
-dibuang atau dipindah ke field lain (`reasoning` diabaikan template); urutan key `arguments` berubah;
-newline di akhir nilai parameter di-strip. Source Pi (`packages/ai/src/api/openai-completions.ts`)
-tidak melakukan satu pun dari ketiganya: field mengikuti signature yang diterima (`reasoning_content`),
-`arguments` = `JSON.stringify` dari object hasil parse (urutan key terjaga), `content` kosong dibuang
-(render identik).
+And the diff of the re-rendered history tokens vs the generated tokens: **identical** for every form.
+Only three things break the cache (deterministic diff via `/apply-template`): `reasoning_content`
+being dropped or moved to another field (`reasoning` is ignored by the template); the key order of
+`arguments` changing; a trailing newline in a parameter value being stripped. The Pi source
+(`packages/ai/src/api/openai-completions.ts`) does none of the three: the field follows the signature
+it received (`reasoning_content`), `arguments` = `JSON.stringify` of the parsed object (key order
+preserved), an empty `content` is dropped (identical render).
 
-**Mengapa satu mismatch berharga seluruh respons.** Model ini `qwen4exp`: layer SSM
-(`ssm.state_size` 128, `full_attention_interval` 4 → 3 dari 4 layer linear attention). State
-recurrent tidak bisa dimundurkan ke posisi sembarang, jadi llama-server hanya bisa kembali ke
-**context checkpoint** (`--ctx-checkpoints` 32, `--checkpoint-min-step` 8192; dibuat saat prompt
-processing, bukan saat generate). Mismatch di mana pun dalam turn → rollback ke checkpoint akhir prompt
-turn sebelumnya → prefill ulang seluruh respons. Terlihat di probe: variant tanpa reasoning selalu
-`cached` = ukuran prompt turn 1 (atau checkpoint lebih awal), bukan posisi mismatch. Pola task 6875
-(`cached` 1988 ≈ prompt turn 1 sebesar 1992) adalah tanda tangan rollback ini; mismatch-nya sendiri
-bisa di mana saja dalam 16k token itu.
+**Why one mismatch costs an entire response.** This model is `qwen4exp`: SSM layers
+(`ssm.state_size` 128, `full_attention_interval` 4 → 3 of every 4 layers are linear attention). A
+recurrent state cannot be rewound to an arbitrary position, so llama-server can only go back to a
+**context checkpoint** (`--ctx-checkpoints` 32, `--checkpoint-min-step` 8192; created during prompt
+processing, not during generate). A mismatch anywhere in a turn → rollback to the end-of-prompt
+checkpoint of the previous turn → re-prefill the entire response. Visible in the probe: the variants
+without reasoning always show `cached` = the size of the turn-1 prompt (or an earlier checkpoint),
+not the mismatch position. The task 6875 pattern (`cached` 1988 ≈ the 1992-token turn-1 prompt) is
+the signature of this rollback; the mismatch itself could be anywhere inside those 16k tokens.
 
-**Status: belum tereproduksi dari sisi server.** Reproduksi paling setia (prompt spreadsheet asli via
-`write_file`, streaming) menabrak `max_tokens` 24000 tanpa selesai (682 s decode) sehingga tidak
-konklusif. Langkah penentu berikutnya dieksekusi saat sesi Pi nyata: server sendiri bisa mencetak
-token di sekitar mismatch. Di launch script Sync:
+**Status: not yet reproduced from the server side.** The most faithful reproduction (the original
+spreadsheet prompt via `write_file`, streaming) hit `max_tokens` 24000 without finishing (682 s
+decode), so it is inconclusive. The decisive next step gets executed during a real Pi session: the
+server itself can print the tokens around the mismatch. In the Sync launch script:
 
 ```bash
 LLAMA_SERVER_SLOTS_DEBUG=1 LLAMA_SERVER_SLOTS_N_DIFF=12 API_KEY=<key> ./stack.sh start llamacpp
 ```
 
-lalu ulangi tugas Pi yang berakhir dengan tool call besar, dan cari di `runs/serve-current.log`
-baris `old: ... | ...` / `new: ... | ...` (WARN, tampil tanpa verbose) — token sebelum `|` cocok,
-sesudahnya adalah mismatch-nya. Env var diwariskan `stack.sh` → `serve.sh` → `llama-server`.
+then repeat the Pi task that ends with a large tool call, and look in `runs/serve-current.log` for
+the lines `old: ... | ...` / `new: ... | ...` (WARN, shown without verbose) — the tokens before the
+`|` match, what follows is the mismatch. The env vars are inherited `stack.sh` → `serve.sh` →
+`llama-server`.
 
-Catatan `cache-ratio.py`: verdict "vLLM territory" 18.5% setelah sesi ini terpolusi probe sintetis
-(3 dari 5 cold call adalah probe). Tanpa probe: 3/25 = 12.0%, dan dua di antaranya adalah turn
-pertama percakapan baru yang memang selalu cold. Rasio cold dengan demikian bergantung pada panjang
-percakapan, bukan hanya pola tugas.
+`cache-ratio.py` note: the "vLLM territory" 18.5% verdict after this session is polluted by synthetic
+probes (3 of 5 cold calls are probes). Without the probes: 3/25 = 12.0%, and two of those are the
+first turn of a new conversation, which is always cold anyway. The cold ratio therefore depends on
+conversation length, not only on the task pattern.
 
-**Catatan decode:** 33 tok/s agregat vs 36.7 tok/s di benchmark. Selisihnya konsisten dengan
-konteks yang jauh lebih panjang (benchmark ~2k, sesi ini sampai 40k) dan acceptance MTP yang
-lebih rendah di kode yang belum pernah ada (0.78–0.89) dibanding saat menyalin ulang (0.99).
-Angka benchmark tidak salah; angka ini yang mewakili pemakaian nyata.
+**Decode note:** 33 tok/s aggregate vs 36.7 tok/s in the benchmark. The gap is consistent with a much
+longer context (benchmark ~2k, this session up to 40k) and a lower MTP acceptance on code that has
+never existed before (0.78–0.89) compared to re-copying existing code (0.99). The benchmark number is
+not wrong; this is the number that represents real usage.
 
 ---
 
-## 2026-09-05: Vision (mmproj) di jalur llama.cpp — jalan, MTP tidak terganggu
+## 2026-09-05: Vision (mmproj) on the llama.cpp path — works, MTP unaffected
 
-Model ini VLM (vision tower 27 layer, projector `qwen3vl_merger`, `image_size` 768,
-`patch_size` 16). Unsloth menyertakan `mmproj-BF16.gguf` (907 542 944 byte) di repo GGUF yang
-sama; recipe ini sebelumnya hanya mengambil shard teks + MTP head. Fork b10715 membawa
-`libmtmd`, jadi cukup `--mmproj` di `serve.sh` (`--vision`) — tidak ada build ulang.
+This model is a VLM (27-layer vision tower, `qwen3vl_merger` projector, `image_size` 768,
+`patch_size` 16). Unsloth ships `mmproj-BF16.gguf` (907 542 944 bytes) in the same GGUF repo; this
+recipe previously only fetched the text shards + MTP head. Fork b10715 brings `libmtmd`, so
+`--mmproj` in `serve.sh` (`--vision`) is enough — no rebuild.
 
-Uji 2026-09-05 (`runs/vision-2026-09-05.jsonl`; server `--mtp --nmax 3 -ub 256 --vision`):
+Test 2026-09-05 (`runs/vision-2026-09-05.jsonl`; server `--mtp --nmax 3 -ub 256 --vision`):
 
-| Request | prompt tok | prefill | completion | decode | acceptance MTP | hasil |
+| Request | prompt tok | prefill | completion | decode | MTP acceptance | result |
 |---|---|---|---|---|---|---|
-| PNG 336² tiga pita warna, "warna apa, urut atas-bawah?" | 196 | 1.39 s | 318 | 42.6 tok/s | 0.977 | benar: red, green, blue |
-| PNG 336² angka 7 hitam di putih, "karakter apa?" | 190 | 0.75 s | 51 | 41.5 tok/s | 0.971 | benar: 7 |
-| kontrol teks saja, server yang sama | 58 | 0.26 s | 87 | 31.5 tok/s | 0.909 | benar |
+| 336² PNG with three colour bands, "what colours, top to bottom?" | 196 | 1.39 s | 318 | 42.6 tok/s | 0.977 | correct: red, green, blue |
+| 336² PNG with a black 7 on white, "what character?" | 190 | 0.75 s | 51 | 41.5 tok/s | 0.971 | correct: 7 |
+| text-only control, same server | 58 | 0.26 s | 87 | 31.5 tok/s | 0.909 | correct |
 
-Catatan:
-- **MTP tetap aktif pada request bergambar** — kontras dengan vLLM (repo Mia): draft model di sana
-  tidak menerima embedding multimodal dan fallback ke decode non-spekulatif. Di llama.cpp draft
-  MTP hanya melihat token teks setelah blok gambar, dan acceptance-nya justru tinggi (0.97) karena
-  jawaban deskriptif itu predictable.
-- Memori: `MemAvailable` 29 → 27.9 GiB, sekitar 1 GiB (bobot projector 0.85 GiB + buffer encode).
-- Gambar kecil ≈ 140 token prompt. llama.cpp memperingatkan: "Qwen-VL models require at minimum
-  1024 image tokens to function correctly on grounding tasks; try `--image-min-tokens 1024`".
-  Tidak dijadikan default karena menaikkan prefill per gambar; relevan hanya untuk bounding box /
-  lokalisasi presisi. `[Belum Terverifikasi]` akurasi grounding pada setting default.
-- Dump `LLAMA_SERVER_SLOTS_DEBUG` ikut menampilkan `<|vision_start|> | [mtmd]...` saat dua request
-  bergambar berbeda mendarat di slot yang sama — itu mismatch yang wajar (gambar berbeda), bukan
-  anomali cache.
-- Hanya gambar. Model card: image + video, tanpa audio. mtmd llama-server menerima still image;
-  video harus di-sample jadi frame oleh client. vLLM (repo Mia) menerima `video_url` langsung.
-- Keputusan: `stack.sh` menyalakan `--vision` otomatis kalau `models/mmproj/` ada (`VISION=0`
-  mematikan). Biaya 1 GiB dinilai sepadan dengan kemampuan yang sebelumnya dianggap tidak ada.
+Notes:
+- **MTP stays active on image requests** — in contrast to vLLM (Mia repo): the draft model there does
+  not receive multimodal embeddings and falls back to non-speculative decode. In llama.cpp the MTP
+  draft only sees the text tokens after the image block, and its acceptance is actually high (0.97)
+  because descriptive answers are predictable.
+- Memory: `MemAvailable` 29 → 27.9 GiB, about 1 GiB (0.85 GiB projector weights + encode buffers).
+- A small image ≈ 140 prompt tokens. llama.cpp warns: "Qwen-VL models require at minimum 1024 image
+  tokens to function correctly on grounding tasks; try `--image-min-tokens 1024`". Not made the
+  default because it raises prefill per image; relevant only for bounding boxes / precise
+  localisation. `[Unverified]` grounding accuracy at the default setting.
+- The `LLAMA_SERVER_SLOTS_DEBUG` dump also shows `<|vision_start|> | [mtmd]...` when two different
+  image requests land in the same slot — that is an expected mismatch (different images), not a cache
+  anomaly.
+- Images only. Model card: image + video, no audio. mtmd llama-server accepts still images; video has
+  to be sampled into frames by the client. vLLM (Mia repo) accepts `video_url` directly.
+- Decision: `stack.sh` turns on `--vision` automatically if `models/mmproj/` exists (`VISION=0`
+  disables it). The 1 GiB cost is judged worth a capability that was previously assumed absent.
 
 ---
 
-## 2026-09-06: Beban banyak file — 7 bug marked dalam satu sesi Pi, dan akar cache miss ditemukan
+## 2026-09-06: Many-file load — 7 marked bugs in a single Pi session, and the root cause of the cache miss found
 
-Uji "beban banyak file" yang ditunggu sejak 2026-09-05. Repo `markedjs/marked` (13 file source,
-410 file spec), snapshot tanpa git history dari commit `c6119b3c` dengan `test/` dari HEAD, sehingga
-**tujuh bug-fix** yang masuk upstream 4–5 September 2026 (jelas di luar data training) tercabut
-sekaligus. Satu prompt: perbaiki semua sampai `npm test` hijau, jangan sentuh `test/`, jangan pakai
-git history atau network. Rules `pi/AGENTS.md` aktif, thinking `medium`, server 131k + vision.
-Sumber angka: `runs/cache-ratio-2026-09-06-marked.jsonl` (94 request, dari log baris 807 ke atas).
+The "many-file load" test that has been pending since 2026-09-05. Repo `markedjs/marked` (13 source
+files, 410 spec files), a snapshot without git history from commit `c6119b3c` with `test/` from HEAD,
+so that **seven bug-fixes** that landed upstream on 4–5 September 2026 (clearly outside the training
+data) are ripped out at once. One prompt: fix them all until `npm test` is green, do not touch
+`test/`, do not use git history or the network. The `pi/AGENTS.md` rules were active, thinking
+`medium`, server 131k + vision. Source of the numbers:
+`runs/cache-ratio-2026-09-06-marked.jsonl` (94 requests, from log line 807 onward).
 
-### Hasil model
+### Model results
 
-**7/7 bug diperbaiki, 1801 spec + 191 unit hijau, tidak ada file test disentuh, satu turn 31 menit**
-(thinking 28 menit di antaranya), 94 request, context tumbuh 2.6k → 70k token. Laporan akhir
-memakai format dan label rules (`[Inferensi]`, "Diverifikasi / Tidak diverifikasi") dalam Bahasa
-Indonesia — `AGENTS.md` dipatuhi sampai turn terakhir. Perbandingan dengan fix upstream:
+**7/7 bugs fixed, 1801 spec + 191 unit tests green, no test file touched, one 31-minute turn**
+(28 minutes of that thinking), 94 requests, context grew 2.6k → 70k tokens. The final report uses the
+format and the rules labels (`[Inferensi]`, "Diverifikasi / Tidak diverifikasi") in Indonesian —
+`AGENTS.md` was obeyed right up to the last turn. Comparison with the upstream fixes:
 
-| Bug | Fix model vs upstream | Catatan |
+| Bug | Model fix vs upstream | Note |
 |---|---|---|
-| tag name HTML (#4083) | identik | dua rule (block + inline) sama persis |
-| fence indent (#4074) | identik | `Math.min(...)` sama |
-| code block kosong (#4073) | identik | tanpa komentar |
-| nested bracket (#4064) | ekuivalen | satu level nesting di-inline, upstream pakai sub-rule terpisah |
-| email autolink (#4063) | berbeda, valid | `(?![a-zA-Z0-9]*[-_])` vs `(?![\w-])`; analisis backtracking-nya benar |
-| ATX heading tab (#4084) | **lulus test, cacat laten** | model memperluas `endingSpaceChar` ke `/[ \t]$/`; upstream menambah rule baru karena `endingSpaceChar` juga dipakai code span (`Tokenizer.ts:848`), yang menurut CommonMark hanya boleh spasi. Tidak ada spec yang menangkap kombinasi spasi+tab |
-| character reference autolink (#4053) | berbeda desain | model meng-escape teks di **tokenizer** dan menambah regex `&` di renderer; upstream menyimpan token mentah dan escape di **renderer** via flag `autolink`. Lulus semua spec, tapi konsumen token custom akan menerima teks yang sudah di-escape — reviewer akan menolak |
+| HTML tag name (#4083) | identical | both rules (block + inline) exactly the same |
+| fence indent (#4074) | identical | same `Math.min(...)` |
+| empty code block (#4073) | identical | without the comment |
+| nested bracket (#4064) | equivalent | one nesting level inlined, upstream uses a separate sub-rule |
+| email autolink (#4063) | different, valid | `(?![a-zA-Z0-9]*[-_])` vs `(?![\w-])`; its backtracking analysis is correct |
+| ATX heading tab (#4084) | **passes the tests, latent defect** | the model widened `endingSpaceChar` to `/[ \t]$/`; upstream added a new rule because `endingSpaceChar` is also used by code spans (`Tokenizer.ts:848`), which per CommonMark may only be spaces. No spec catches the space+tab combination |
+| character reference autolink (#4053) | different design | the model escapes the text in the **tokenizer** and adds an `&` regex in the renderer; upstream keeps the raw token and escapes in the **renderer** via the `autolink` flag. Passes every spec, but consumers of custom tokens would receive already-escaped text — a reviewer would reject it |
 
-Kesimpulan kualitas: 5 fix setara upstream, 2 lulus test tapi kalah desain, satu di antaranya
-bug laten. Untuk model 4-bit lokal tanpa bantuan, ini level kontributor yang PR-nya perlu satu
-putaran review, bukan yang perlu ditulis ulang.
+Quality conclusion: 5 fixes on par with upstream, 2 that pass the tests but lose on design, one of
+them a latent bug. For a local 4-bit model with no help, this is the level of a contributor whose PR
+needs one review round, not one that needs rewriting.
 
-### Cache dan kecepatan
+### Cache and speed
 
-| | Nilai |
+| | Value |
 |---|---|
-| Request / prompt tokens total | 94 / 3 123 134 |
-| Cached | **99.1%**; cold call **0/94** |
-| Prefill wall | 109 s total, 1.16 s per call; terlama 9.3 s (tool result 4.2k token) |
-| Completion tokens / decode | 45 900 tok / 1700 s → **27.0 tok/s** agregat pada context 30–70k |
-| Draft acceptance MTP | 0.861 |
-| Context akhir | 70 043 token, tanpa compaction (threshold 106k) |
+| Requests / total prompt tokens | 94 / 3 123 134 |
+| Cached | **99.1%**; cold calls **0/94** |
+| Prefill wall | 109 s total, 1.16 s per call; longest 9.3 s (4.2k-token tool result) |
+| Completion tokens / decode | 45 900 tok / 1700 s → **27.0 tok/s** aggregate at 30–70k context |
+| MTP draft acceptance | 0.861 |
+| Final context | 70 043 tokens, no compaction (threshold 106k) |
 
-Decode 27 tok/s vs 33 di sesi spreadsheet (≤40k) vs 36.7 benchmark (~2k): penurunan konsisten
-dengan panjang context. Verdict cache-ratio: llama.cpp + MTP territory, dengan margin jauh.
+Decode 27 tok/s vs 33 in the spreadsheet session (≤40k) vs 36.7 in the benchmark (~2k): the drop is
+consistent with context length. cache-ratio verdict: llama.cpp + MTP territory, by a wide margin.
 
-### Akar cache miss turn-2 (task 6875 kemarin) — TERJAWAB: token boundary drift
+### Root cause of the turn-2 cache miss (yesterday's task 6875) — ANSWERED: token boundary drift
 
-Jebakan `LLAMA_SERVER_SLOTS_DEBUG` menangkap **2 mismatch nyata dari 93 request** dalam sesi
-(2.2%), plus 1 di awal sesi yang wajar (cwd di system prompt berubah `marked` → `marked-eval`).
-Keduanya pola yang sama: **teks identik, token id berbeda**.
+The `LLAMA_SERVER_SLOTS_DEBUG` trap caught **2 real mismatches out of 93 requests** in the session
+(2.2%), plus 1 at the start of the session that is expected (the cwd in the system prompt changed
+`marked` → `marked-eval`). Both are the same pattern: **identical text, different token ids**.
 
-- task 6211: di dalam perintah tool call `sed -n '/^const atx/,/$/p' src/rules.ts | head -12`,
-  split di sekitar `/,` + ` /$/p'`. Rollback 225 token, 0.7 s.
-- task 14580: di dalam reasoning berisi regex, ``...or end. ` `` + `@` — cache punya token
-  `` ` `` lalu `@...`, prompt baru punya token `` `@ `` (ids `... 13151 75370 ...` vs
-  `... 74988 5431 ...`). Rollback ke checkpoint = **seluruh respons sebelumnya (2 597 token) +
-  tool result**, 2 667 token, 7.4 s.
+- task 6211: inside the tool call command `sed -n '/^const atx/,/$/p' src/rules.ts | head -12`, the
+  split is around `/,` + ` /$/p'`. Rollback of 225 tokens, 0.7 s.
+- task 14580: inside reasoning containing a regex, ``...or end. ` `` + `@` — the cache has a `` ` ``
+  token then `@...`, the new prompt has a `` `@ `` token (ids `... 13151 75370 ...` vs
+  `... 74988 5431 ...`). Rollback to the checkpoint = **the entire previous response (2 597 tokens) +
+  the tool result**, 2 667 tokens, 7.4 s.
 
-Jadi hipotesis (a) yang benar, bukan (b) template dan bukan (c) client: **token yang di-generate
-bukan tokenisasi kanonik dari teksnya**. Client (Pi) mengirim balik teks, server men-tokenize ulang
-secara kanonik, dan di posisi drift token id berbeda meski teksnya sama. Di model hybrid ini
-mismatch sekecil itu memundurkan ke checkpoint akhir prompt sebelumnya, jadi biayanya = panjang
-respons sebelumnya: 0.7 s untuk respons 200 token, 7 s untuk 2.6k, **37 s untuk respons one-shot
-16k token kemarin**. Frekuensinya ~2% request, cenderung pada teks padat tanda baca (regex, shell,
-backtick). Semua pengujian sintetis `cache-probe.py` HIT karena outputnya prosa dan kode biasa.
+So hypothesis (a) is the right one, not (b) the template and not (c) the client: **the generated
+tokens are not the canonical tokenization of their text**. The client (Pi) sends the text back, the
+server re-tokenizes canonically, and at the drift position the token ids differ even though the text
+is the same. In this hybrid model a mismatch that small rewinds to the previous end-of-prompt
+checkpoint, so the cost = the length of the previous response: 0.7 s for a 200-token response, 7 s
+for 2.6k, **37 s for yesterday's 16k-token one-shot response**. Frequency ~2% of requests, tending to
+occur on text dense with punctuation (regex, shell, backticks). All the synthetic `cache-probe.py`
+tests HIT because their output is ordinary prose and code.
 
-`[Spekulasi]` Sumber drift kemungkinan MTP: draft head mengusulkan token, dan urutan yang diterima
-tidak harus sama dengan hasil tokenizer atas teks yang sama. Ujinya: sesi serupa dengan
-`--spec-type` dimatikan dan hitung mismatch — belum dijalankan karena decode tanpa MTP jauh lebih
-lambat. Mitigasi yang tersedia sekarang: tidak ada yang murah; biayanya terikat ke panjang respons
-sebelumnya, jadi thinking `medium` (respons lebih pendek) sekaligus memperkecil biaya miss.
-Perbaikan sesungguhnya ada di server: membandingkan cache berdasarkan teks, bukan token id, atau
-checkpoint periodik selama generate. Layak dilaporkan ke upstream dengan dump di atas.
-
----
-
-## 2026-09-06: Ide dari repo Mia — reduced-vocabulary drafting (belum bisa di llama.cpp)
-
-Repo MiaAI-Lab (vLLM) menaikkan decode single-stream 36.9 → 46.3 tok/s (+25%) dengan satu
-perubahan: draft head MTP hanya menghitung argmax atas 65 536 token paling sering dipakai, bukan
-seluruh vocab 248 320 (gaya FR-Spec, `files/patch_mtp_draft_vocab.py`). Alasannya: `lm_head`
-drafter dibaca sekali per draft step, tiga kali per engine step pada MTP 3, dan decode sudah di
-tembok bandwidth, jadi byte yang hilang berubah jadi waktu hampir satu-satu. Akurasi output tidak
-berubah karena target memverifikasi tiap draft; draft yang salah hanya menurunkan acceptance
-(MGSM 250 soal per bahasa: EN 94.8% vs 93.6%, ZH 86.4% vs 86.4%, angka mereka, single-run).
-
-Relevansi untuk recipe ini `[Inferensi]`: jalur `draft-mtp` llama.cpp juga menghitung logits penuh
-atas 248 320 token untuk tiap draft token. `[estimate]` head Q8_0 = 248 320 × 2 560 ≈ 0.67 GB per
-draft, ~2 GB per step pada `--nmax 3`, dibanding ~6.35 GB per token target dari roofline (273 GB/s
-÷ 43 tok/s) — sekitar seperempat byte per step. Kalau bisa dipangkas seperti di vLLM, decode
-berpotensi ke kisaran 45 tok/s. **Tidak ada flag llama-server untuk ini**; butuh perubahan kode di
-jalur speculative (argmax draft atas subset vocab). Dicatat sebagai ide, bukan rencana: tidak ada
-yang bisa diubah di recipe hari ini, dan kontribusi upstream dariku tidak mungkin (lihat
-kebijakan AI llama.cpp). Kalau suatu saat upstream menambahkannya, itu satu flag yang layak diuji
-pertama.
-
-Dua hal lain dari update mereka yang tidak berlaku di sini: prefetch page-fault PLE (`posix_fadvise`)
-— PLE kita resident, bukan mmap; dan `CUDAGRAPH_CAPTURE_SIZES=auto` — spesifik vLLM.
+`[Speculation]` The source of the drift is probably MTP: the draft head proposes tokens, and the
+accepted sequence need not match what the tokenizer would produce for the same text. The test: a
+similar session with `--spec-type` disabled and count the mismatches — not run yet because decode
+without MTP is far slower. Mitigation available today: none that is cheap; the cost is tied to the
+length of the previous response, so thinking `medium` (shorter responses) also shrinks the cost of a
+miss. The real fix is in the server: comparing the cache by text rather than by token id, or periodic
+checkpoints during generate. Worth reporting upstream with the dump above.
 
 ---
 
-## 2026-09-06: Opsi A — sweep flag speculative: `--spec-draft-p-min 0.50` +10% decode
+## 2026-09-06: Idea from the Mia repo — reduced-vocabulary drafting (not possible in llama.cpp yet)
 
-Satu-satunya knob speculative yang belum pernah disapu. `serve.sh` kini menerima `--pmin` (default
-0.75, nilai yang sebelumnya hardcoded) dan `stack.sh` meneruskan `NMAX`/`PMIN` dari env. Semua angka
-dari `runs/bench-stream2.jsonl`, label `sweepA-*` dan `sweepA2-*`, server restart per konfigurasi
-(cache kosong), 3 request per start, warm-up dibuang.
+The MiaAI-Lab repo (vLLM) raised single-stream decode 36.9 → 46.3 tok/s (+25%) with one change: the
+MTP draft head computes argmax over only the 65 536 most frequently used tokens instead of the whole
+248 320 vocab (FR-Spec style, `files/patch_mtp_draft_vocab.py`). The reasoning: the drafter's
+`lm_head` is read once per draft step, three times per engine step at MTP 3, and decode is already
+against the bandwidth wall, so the bytes saved turn into time almost one-to-one. Output accuracy does
+not change because the target verifies every draft; a wrong draft only lowers acceptance (MGSM, 250
+problems per language: EN 94.8% vs 93.6%, ZH 86.4% vs 86.4%, their numbers, single-run).
 
-**Putaran 1, lima konfigurasi, 2 run valid masing-masing:**
+Relevance to this recipe `[Inference]`: llama.cpp's `draft-mtp` path also computes full logits over
+248 320 tokens for each draft token. `[estimate]` a Q8_0 head = 248 320 × 2 560 ≈ 0.67 GB per draft,
+~2 GB per step at `--nmax 3`, compared to ~6.35 GB per target token from the roofline (273 GB/s ÷ 43
+tok/s) — about a quarter of the bytes per step. If it could be trimmed as in vLLM, decode could
+potentially reach the 45 tok/s range. **There is no llama-server flag for this**; it needs a code
+change in the speculative path (draft argmax over a vocab subset). Recorded as an idea, not a plan:
+nothing in the recipe can change today, and an upstream contribution from me is impossible (see the
+llama.cpp AI policy). If upstream ever adds it, that is the first flag worth testing.
 
-| nmax / p-min | decode median | vs baseline |
+Two other things from their update that do not apply here: PLE page-fault prefetch (`posix_fadvise`)
+— our PLE is resident, not mmap; and `CUDAGRAPH_CAPTURE_SIZES=auto` — vLLM-specific.
+
+---
+
+## 2026-09-06: Option A — speculative flag sweep: `--spec-draft-p-min 0.50` +10% decode
+
+The only speculative knob that had never been swept. `serve.sh` now accepts `--pmin` (default 0.75,
+the value that was previously hardcoded) and `stack.sh` passes `NMAX`/`PMIN` through from the
+environment. All numbers from `runs/bench-stream2.jsonl`, labels `sweepA-*` and `sweepA2-*`, server
+restarted per configuration (empty cache), 3 requests per start, warm-up discarded.
+
+**Round 1, five configurations, 2 valid runs each:**
+
+| nmax / p-min | median decode | vs baseline |
 |---|---|---|
-| 3 / 0.75 (baseline hari ini) | 38.1 tok/s | — |
+| 3 / 0.75 (today's baseline) | 38.1 tok/s | — |
 | 4 / 0.75 | 39.1 | +2.5%, noise |
 | **3 / 0.50** | **41.7** | **+9.4%** |
 | 2 / 0.75 | 36.8 | −3.4%, noise |
-| 3 / 0.90 | 33.8 | tidak sah — prompt yang gagal berbeda dari baseline |
+| 3 / 0.90 | 33.8 | invalid — the failing prompt differs from the baseline |
 
-**Putaran 2, A/B bergantian 3 restart per sisi** (label `sweepA2-*`):
+**Round 2, alternating A/B with 3 restarts per side** (labels `sweepA2-*`):
 
 | | p-min 0.75 | p-min 0.50 |
 |---|---|---|
-| run valid | 5 | 4 |
-| prompt `llama-kv-cache.cpp`, 3 restart | 34.0 / 36.0 / 35.0 → **35.0** | 39.0 / 39.1 / 38.1 → **38.8** (+10.7%) |
+| valid runs | 5 | 4 |
+| prompt `llama-kv-cache.cpp`, 3 restarts | 34.0 / 36.0 / 35.0 → **35.0** | 39.0 / 39.1 / 38.1 → **38.8** (+10.7%) |
 | prompt `arg.cpp` | 41.5 / 41.2 | 46.2 (+11.7%, 1 run) |
-| TTFT median | 28.25 s | 28.25 s |
+| median TTFT | 28.25 s | 28.25 s |
 | draft acceptance | 0.931 | 0.840 |
 | mean accepted length | 3.21 | 3.30 |
 
-Mekanismenya koheren: p-min lebih rendah membuat drafter mengajukan token lebih banyak per step
-(mendekati `nmax` 3 setiap kali), lebih banyak yang ditolak (acceptance turun), tapi jumlah token
-diterima per step justru naik (3.21 → 3.30) dan itu yang menentukan tok/s. Kualitas output tidak
-tersentuh: target memverifikasi tiap draft, jadi p-min hanya mengatur biaya, bukan hasil. Pada
-prompt yang sama, tiga restart berturut-turut, rentangnya tidak tumpang tindih (34.0–36.0 vs
-38.1–39.1). `nmax` 4 tidak membantu; sisa gain dari p-min 0.50 sekitar +10%, bukan +25% seperti
-reduced-vocab drafting di vLLM.
+The mechanism is coherent: a lower p-min makes the drafter propose more tokens per step (approaching
+`nmax` 3 every time), more of them get rejected (acceptance drops), but the number of accepted tokens
+per step actually rises (3.21 → 3.30) and that is what determines tok/s. Output quality is untouched:
+the target verifies every draft, so p-min only tunes cost, not the result. On the same prompt, three
+consecutive restarts, the ranges do not overlap (34.0–36.0 vs 38.1–39.1). `nmax` 4 does not help; the
+remaining gain from p-min 0.50 is about +10%, not the +25% of reduced-vocab drafting in vLLM.
 
-**Keputusan (2026-09-06, setelah opsi C):** `p-min 0.50` dijadikan default di `stack.sh`/`serve.sh`;
-`PMIN=0.75` mengembalikan yang lama.
+**Decision (2026-09-06, after option C):** `p-min 0.50` becomes the default in `stack.sh`/`serve.sh`;
+`PMIN=0.75` restores the old value.
 
-**Anomali "prompt `speculative.cpp` → 1 token" TERJAWAB (item lama di tracker).** Di semua 11 start
-sweep ini, request pertama (warm-up, prompt `speculative.cpp`, 10 892 token) berakhir setelah 1 token,
-dan run ke-3 (prompt yang sama, cache RAM mengembalikan state → hanya 4 token di-prefill) juga
-1 token. Prompt `arg.cpp` mengalami hal yang sama secara intermiten (3 dari 6 start). `bench-stream.py`
-memakai `/v1/completions` mentah tanpa chat template, dan pada prompt-prompt itu model langsung
-mengeluarkan token akhir. Ini artefak harness, bukan bug server, dan tidak bergantung pada parameter
-speculative. Konsekuensinya: tiap start hanya menghasilkan 1–2 run valid dari 3. Cacat harness #6
-untuk diperbaiki kalau benchmark ini dipakai lagi: pakai chat completions atau tambah prompt.
+**The "prompt `speculative.cpp` → 1 token" anomaly is ANSWERED (an old item in the tracker).** In all
+11 starts of this sweep, the first request (warm-up, prompt `speculative.cpp`, 10 892 tokens) ended
+after 1 token, and the 3rd run (same prompt, the RAM cache restoring the state → only 4 tokens
+prefilled) also gave 1 token. The `arg.cpp` prompt does the same thing intermittently (3 of 6
+starts). `bench-stream.py` uses raw `/v1/completions` without a chat template, and on those prompts
+the model immediately emits an end token. This is a harness artefact, not a server bug, and it does
+not depend on the speculative parameters. The consequence: each start yields only 1–2 valid runs out
+of 3. Harness flaw #6 to fix if this benchmark is used again: use chat completions or add prompts.
 
 ---
 
-## 2026-09-06: Greedy tidak deterministik — dan di llama.cpp penyebabnya MTP
+## 2026-09-06: Greedy is not deterministic — and in llama.cpp the cause is MTP
 
-Pemicu: issue #28 di repo Mia (reproduksi independen di Spark lain): pada vLLM mereka, lima request
-identik `temperature=0` menghasilkan lima output berbeda, **juga dengan MTP mati**, dan pada prompt
-"lanjutkan cerita" model kadang membaca ulang context verbatim, yang menggelembungkan acceptance MTP
-(0.93 pada recital vs 0.37–0.41 pada generasi jujur) dan dengan itu angka decode prosa mereka.
+Trigger: issue #28 in the Mia repo (an independent reproduction on another Spark): on their vLLM,
+five identical `temperature=0` requests produced five different outputs, **even with MTP off**, and
+on a "continue the story" prompt the model sometimes reads the context back verbatim, which inflates
+MTP acceptance (0.93 on recital vs 0.37–0.41 on honest generation) and with it their prose decode
+numbers.
 
-Diuji di server kita, dua prompt (kode dan prosa), lima request identik per prompt, `max_tokens`
-220, greedy, semua request mendarat di slot yang sama (slot 3, prefix-cache hit 4 token) sehingga
-rotasi slot bukan variabel:
+Tested on our server, two prompts (code and prose), five identical requests per prompt, `max_tokens`
+220, greedy, all requests landing in the same slot (slot 3, prefix-cache hit of 4 tokens) so slot
+rotation is not a variable:
 
-| | MTP 3 (profil terpasang) | MTP mati (`MTP=0 ./stack.sh start llamacpp`) |
+| | MTP 3 (installed profile) | MTP off (`MTP=0 ./stack.sh start llamacpp`) |
 |---|---|---|
-| kode, output berbeda | **5/5**, divergen setelah ~275 karakter | **1/5** — identik byte per byte |
-| prosa, output berbeda | **3/5**, divergen setelah ~236 karakter | **1/5** |
+| code, differing outputs | **5/5**, diverging after ~275 characters | **1/5** — byte-for-byte identical |
+| prose, differing outputs | **3/5**, diverging after ~236 characters | **1/5** |
 
-Jadi berbeda dari vLLM: **jalur non-spekulatif llama.cpp deterministik**, dan non-determinisme
-datang dari speculative decoding. `[Inferensi]` Saat verifikasi, target memproses 1+n token dalam satu
-batch, bukan satu token; bentuk batch yang berbeda memakai jalur kernel/urutan reduksi yang berbeda,
-dan pada logit yang hampir seri argmax-nya bisa berbeda. Karena panjang draft tiap step bergantung
-pada `p-min` dan isi, bentuk batch berubah-ubah, dan satu token berbeda mengubah semua yang
-mengikutinya. Ini juga penjelasan yang konsisten untuk token boundary drift (bagian 2026-09-06 di
-atas): draft mengusulkan pemenggalan token yang bukan kanonik, dan target menerimanya pada seri.
+So it differs from vLLM: **llama.cpp's non-speculative path is deterministic**, and the
+non-determinism comes from speculative decoding. `[Inference]` During verification the target
+processes 1+n tokens in one batch, not a single token; a different batch shape takes a different
+kernel path / reduction order, and on near-tied logits the argmax can differ. Since the draft length
+per step depends on `p-min` and on the content, the batch shape keeps changing, and one differing
+token changes everything that follows. This is also a consistent explanation for the token boundary
+drift (the 2026-09-06 section above): the draft proposes a non-canonical token split, and the target
+accepts it on a tie.
 
-Konsekuensi praktis:
-- Output tetap berkualitas sama secara rata-rata (tiap token adalah argmax target pada batch itu),
-  tapi **tidak bit-reproducible** selama MTP aktif. Eval akurasi kita (2026-09-04) dijalankan dengan
-  MTP on, jadi angka 97.3% / 93.9% punya varian run-ke-run kecil yang belum diukur; untuk eval yang
-  harus reproducible, pakai `MTP=0`.
-- Benchmark decode pada prompt yang mengundang kutipan (mis. "jelaskan file ini") menaikkan
-  acceptance. Angka bench kita 0.93 vs 0.86 di sesi coding nyata konsisten dengan efek itu; angka
-  sesi nyata yang mewakili.
-- `stack.sh` kini menerima `MTP=0` untuk diagnostik semacam ini; decode tanpa MTP ~24 tok/s.
+Practical consequences:
+- Output stays equally good on average (each token is the target's argmax for that batch), but it is
+  **not bit-reproducible** while MTP is active. Our accuracy eval (2026-09-04) was run with MTP on,
+  so the 97.3% / 93.9% numbers have a small run-to-run variance that has not been measured; for evals
+  that must be reproducible, use `MTP=0`.
+- Decode benchmarks on prompts that invite quoting (e.g. "explain this file") raise acceptance. Our
+  bench number of 0.93 vs 0.86 in a real coding session is consistent with that effect; the real
+  session number is the representative one.
+- `stack.sh` now accepts `MTP=0` for diagnostics like this; decode without MTP is ~24 tok/s.
 
-Dua hal lain dari issue Mia yang tidak berlaku di sini: blok attention QSA 3 200 token yang membuat
-prefix-cache hit mustahil di bawah ~6 400 token prompt — di llama.cpp probe kita hit pada prompt
-100 token; dan recital verbatim belum kita amati di sesi coding (acceptance 0.84–0.86, bukan 0.93).
+Two other things from the Mia issue that do not apply here: the 3 200-token QSA attention block that
+makes prefix-cache hits impossible below ~6 400 prompt tokens — in llama.cpp our probe hits on a
+100-token prompt; and verbatim recital, which we have not observed in a coding session (acceptance
+0.84–0.86, not 0.93).
 
 ---
 
-## 2026-09-06: Opsi C dikerjakan — build sendiri dengan patch, crash hilang, kecepatan setara prebuilt
+## 2026-09-06: Option C done — own build with a patch, crash gone, speed on par with prebuilt
 
-Pertanyaan yang dijawab: bisakah "cara Mia" (patch runtime + build sendiri) dipakai di llama.cpp
-untuk menghilangkan crash `MUL_MAT_ID` tanpa `-ub 256`, dan berapa harganya. Jawabannya: bisa, satu
-baris patch, dan setelah komposisi source-nya benar, tanpa kehilangan kecepatan. Tapi jalan ke sana
-mengajarkan beberapa hal tentang binari prebuilt Unsloth yang tidak terlihat dari luar.
+The question answered: can the "Mia way" (runtime patch + own build) be used in llama.cpp to
+eliminate the `MUL_MAT_ID` crash without `-ub 256`, and at what price. The answer: yes, a one-line
+patch, and once the source composition is right, without losing speed. But getting there taught a few
+things about the Unsloth prebuilt binaries that are not visible from the outside.
 
-### Yang dicoba, urut kronologis (`runs/bench-stream2.jsonl`, label di kolom pertama; probe crash =
-token mentah ukuran 367/512 pada `-ub 512`; server restart per baris)
+### What was tried, in chronological order (`runs/bench-stream2.jsonl`, labels in the first column; crash probe =
+raw tokens of size 367/512 at `-ub 512`; server restarted per row)
 
 | Label | Source | Compiler | Crash 367 | TTFT 10.9k | Decode |
 |---|---|---|---|---|---|
-| `llamacpp-mtp-ub256` | prebuilt b10715 (profil terpasang) | nvcc 13.3 (CI) | dihindari via ub 256 | 26.2 s | 36.7 |
+| `llamacpp-mtp-ub256` | prebuilt b10715 (installed profile) | nvcc 13.3 (CI) | avoided via ub 256 | 26.2 s | 36.7 |
 | `llamacpp-mtp-ub512` | prebuilt b10715 | — | **crash** | 21.9 s | 37.2 |
-| `b10798-ub256` | prebuilt b10798 (2026-09-04) | — | crash di ub 512 | 25.8 s | 39.3 |
-| `mmqfix-ub512` | branch `mtp/qwen4exp-nextn` + patch | nvcc 13.0 | **tidak crash**, sweep 1–600 bersih | 33.6 s | 33.1 |
-| `mmqfix-cub-ub512/256` | sama + CUB 3.2 | nvcc 13.0 | tidak crash | 36.1 / 38.7 s | 33.6 / 35.1 |
-| `mmqfix-n133-ub512/256` | sama + CUB 3.2 | nvcc 13.3 (redist lokal) | tidak crash | 36.0 / 41.5 s | 34.8 / 34.2 |
-| **`mixfix-ub256`** | **mix b10715 dirakit ulang + patch** | nvcc 13.0 | — | **26.1 s** | **38.0** |
-| **`mixfix-ub512`** | sama | nvcc 13.0 | **tidak crash** | **23.4 s** | **36.2** |
+| `b10798-ub256` | prebuilt b10798 (2026-09-04) | — | crash at ub 512 | 25.8 s | 39.3 |
+| `mmqfix-ub512` | branch `mtp/qwen4exp-nextn` + patch | nvcc 13.0 | **no crash**, sweep 1–600 clean | 33.6 s | 33.1 |
+| `mmqfix-cub-ub512/256` | same + CUB 3.2 | nvcc 13.0 | no crash | 36.1 / 38.7 s | 33.6 / 35.1 |
+| `mmqfix-n133-ub512/256` | same + CUB 3.2 | nvcc 13.3 (local redist) | no crash | 36.0 / 41.5 s | 34.8 / 34.2 |
+| **`mixfix-ub256`** | **b10715 mix reassembled + patch** | nvcc 13.0 | — | **26.1 s** | **38.0** |
+| **`mixfix-ub512`** | same | nvcc 13.0 | **no crash** | **23.4 s** | **36.2** |
 
-### Tiga hal yang dipelajari
+### Three things learned
 
-1. **Tag rilis "mix" Unsloth bukan pohon source.** `git clone --branch b10715-mix-86bd2d3` memberi
-   commit manifest tanpa `qwen4exp`. Binari prebuilt dirakit CI dari upstream b10715 + 14 commit PR
-   yang dipin di `scripts/unsloth/pr-set.json`, di-merge berurutan, konflik add/add diselesaikan
-   `additive_merge.py` mereka. `patches/compose-mix.py` mengulang proses itu secara lokal; hasilnya
-   commit yang berbeda hash-nya tapi isinya sama, dan ke-14 merge bersih (dua lewat resolusi add/add).
-2. **Branch MTP fork (`mtp/qwen4exp-nextn`) bukan pengganti yang setara.** Build dari branch itu
-   memperbaiki crash tapi prefill 30–50% lebih lambat dan decode −10%, dan itu **bukan** karena
-   compiler: nvcc 13.0 vs 13.3, CUB 3.0 vs 3.2, dan konfigurasi CPU backend semuanya dicoba tanpa
-   efek. Basis upstream juga bukan (prebuilt b10798 lebih baru dan justru tercepat). Selisihnya ada di
-   komposisi source: branch itu membawa commit MTP yang berbeda dari #144 versi repin di mix (antara
-   lain "key the CUDA graph cache by shape" dan jalur *borrow target tensors* dari PR #142 yang tidak
-   ada di mix). `[Inferensi]` mana persisnya yang lambat belum diisolasi; tidak perlu, karena mix
-   yang dirakit ulang sudah setara prebuilt.
-3. **Harness memori.** Build `nvcc -j8` di samping server 91 GiB ternyata aman di sistem (tanpa
-   `NV_ERR_NO_MEMORY`), tapi pengaman memori Claude Code beberapa kali mematikan proses build; solusi
-   praktisnya menjalankan build detached (`setsid nohup`) dengan server dihentikan.
+1. **The Unsloth "mix" release tag is not a source tree.** `git clone --branch b10715-mix-86bd2d3`
+   gives a manifest commit without `qwen4exp`. The prebuilt binaries are assembled by CI from
+   upstream b10715 + 14 PR commits pinned in `scripts/unsloth/pr-set.json`, merged in order, add/add
+   conflicts resolved by their `additive_merge.py`. `patches/compose-mix.py` repeats that process
+   locally; the result is a commit with a different hash but the same content, and all 14 merges are
+   clean (two via add/add resolution).
+2. **The fork's MTP branch (`mtp/qwen4exp-nextn`) is not an equivalent substitute.** A build from
+   that branch fixes the crash but prefill is 30–50% slower and decode −10%, and that is **not** the
+   compiler: nvcc 13.0 vs 13.3, CUB 3.0 vs 3.2, and CPU backend configurations were all tried with no
+   effect. Nor is it the upstream base (prebuilt b10798 is newer and is in fact the fastest). The
+   difference is in the source composition: that branch carries MTP commits different from the
+   repinned #144 in the mix (among others "key the CUDA graph cache by shape" and the *borrow target
+   tensors* path from PR #142, which is absent in the mix). `[Inference]` exactly which one is slow
+   has not been isolated; no need, since the reassembled mix is already on par with the prebuilt.
+3. **Memory harness.** An `nvcc -j8` build alongside a 91 GiB server turned out to be safe on the
+   system (no `NV_ERR_NO_MEMORY`), but a memory guard in the terminal session killed the build process several
+   times; the practical solution is to run the build detached (`setsid nohup`) with the server
+   stopped.
 
-### Hasil dan artefak
+### Results and artefacts
 
-- `patches/mmq-ids-tail-padding.patch`: satu baris di `ggml/src/ggml-cuda/mmq.cu`, identik dengan
-  PR #27044 upstream, hanya untuk jalur `mul_mat_id` (baris dense path dibiarkan).
-- `patches/compose-mix.py` + `build-fork.sh`: clone upstream penuh, rakit mix sesuai manifest tag,
-  apply patch, build (`GGML_CUDA_CUB_3DOT2=ON`, arch native), hasil di `forks/unsloth-mixfix/`.
-  Skrip menolak kalau patch tidak lagi cocok, jadi fix upstream akan terlihat.
-- Pemakaian: `FORK=unsloth-mixfix UBATCH=512 ./stack.sh start llamacpp`. Semua fitur lain (MTP,
-  vision, `--pmin`) sama karena `serve.sh` hanya mengganti direktori binari.
-- Keuntungan terukur vs profil terpasang: TTFT cold 26.2 → 23.4 s (−11%) pada prompt 10.9k, decode
-  setara, dan yang utama: **tidak ada lagi ukuran ubatch yang crash**. Sweep 1–600 pada `-ub 512`:
-  **600/600 ukuran lolos, 0 baris `CUDA error` di log**, dan bench ulang setelah sweep 23.5 s / 36.0 tok/s.
-- Profil terpasang **tidak diubah**: prebuilt + `-ub 256` tetap default karena tidak butuh build.
-  Ini opsi untuk yang mau, dan menjadi tidak perlu begitu #27044 di-merge upstream dan masuk ke
-  prebuilt Unsloth.
+- `patches/mmq-ids-tail-padding.patch`: one line in `ggml/src/ggml-cuda/mmq.cu`, identical to
+  upstream PR #27044, for the `mul_mat_id` path only (the dense path line is left alone).
+- `patches/compose-mix.py` + `build-fork.sh`: full upstream clone, assemble the mix per the tag
+  manifest, apply the patch, build (`GGML_CUDA_CUB_3DOT2=ON`, native arch), result in
+  `forks/unsloth-mixfix/`. The script refuses if the patch no longer applies, so an upstream fix will
+  be visible.
+- Usage: `FORK=unsloth-mixfix UBATCH=512 ./stack.sh start llamacpp`. All other features (MTP, vision,
+  `--pmin`) are the same because `serve.sh` only swaps the binary directory.
+- Measured benefit vs the installed profile: cold TTFT 26.2 → 23.4 s (−11%) on a 10.9k prompt, decode
+  on par, and the main one: **no ubatch size crashes any more**. Sweep 1–600 at `-ub 512`:
+  **600/600 sizes pass, 0 `CUDA error` lines in the log**, and a re-bench after the sweep of
+  23.5 s / 36.0 tok/s.
+- The installed profile is **unchanged**: prebuilt + `-ub 256` remains the default because it needs
+  no build. This is an option for those who want it, and it becomes unnecessary once #27044 is merged
+  upstream and reaches the Unsloth prebuilds.
 
-### 2026-09-06 (lanjutan): basis b10798 + patch, dan uji CUDA graphs
+### 2026-09-06 (continued): b10798 base + patch, and a CUDA graphs test
 
-Dua hal berikutnya dari daftar optimasi lanjutan, dikerjakan dengan pipeline yang sama
-(`TAG=b10798-mix-659e406 ./build-fork.sh`; `runs/bench-stream2.jsonl` label `b10798fix-*`,
-`runs/crash-sweep-2026-09-04.jsonl` entri b10798):
+The next two items from the follow-up optimisation list, done with the same pipeline
+(`TAG=b10798-mix-659e406 ./build-fork.sh`; `runs/bench-stream2.jsonl` labels `b10798fix-*`,
+`runs/crash-sweep-2026-09-04.jsonl` b10798 entries):
 
-| | prebuilt b10715 + `-ub 256` (terpasang) | mix b10715 + patch, `-ub 512` | **mix b10798 + patch, `-ub 512`** |
+| | prebuilt b10715 + `-ub 256` (installed) | b10715 mix + patch, `-ub 512` | **b10798 mix + patch, `-ub 512`** |
 |---|---|---|---|
-| Sweep ubatch 1–600 | crash tanpa ub 256 | 600/600 | **600/600, 0 CUDA error** |
+| Ubatch sweep 1–600 | crashes without ub 256 | 600/600 | **600/600, 0 CUDA errors** |
 | TTFT 10.9k | 26.2 s | 23.4 s | **21.1 s (−20%)** |
 | Decode | 36.7 tok/s | 36.2 | **39.0 (+6%)** |
 
-Kenaikan decode-nya datang dari 83 commit upstream antara b10715 dan b10798 — fusion MoE
-diperluas ke speculative decoding, fusi reduksi expert berbobot, swizzle tile K/V flash
-attention, indexer qwen4exp per slice — bukan dari patch. Sama seperti yang terukur di prebuilt
-b10798 (39.3 tok/s di ub 256), hanya sekarang tanpa crash. Ini build terbaik yang ada saat ini;
-`build-fork.sh` memakai tag ini sebagai default.
+The decode gain comes from the 83 upstream commits between b10715 and b10798 — MoE fusion extended
+to speculative decoding, fused weighted expert reduction, flash attention K/V tile swizzle, per-slice
+qwen4exp indexer — not from the patch. The same as measured on the b10798 prebuilt (39.3 tok/s at ub
+256), only now without the crash. This is the best build available right now; `build-fork.sh` uses
+this tag as its default.
 
-**CUDA graphs bukan overhead tersembunyi.** A/B pada build yang sama, ub 256:
-`GGML_CUDA_DISABLE_GRAPHS=1` → 37.5 vs 38.9 tok/s, sekitar −4%, TTFT sama. Jadi graphs memang
-aktif di jalur verifikasi MTP dan sumbangannya kecil; per-step overhead yang tersisa ada di tempat
-lain (gather PLE di CPU, indexer QSA, sinkronisasi draft). Kandidat patch "graph cache" dicoret.
-Yang tersisa untuk 40+ di context pendek: `PMIN=0.50` (+10% terukur) di atas build ini
-`[estimate]` ~43 tok/s; untuk context panjang: PR Unsloth #150/#165 (QSA decode) belum dicoba.
+**CUDA graphs are not hidden overhead.** A/B on the same build, ub 256:
+`GGML_CUDA_DISABLE_GRAPHS=1` → 37.5 vs 38.9 tok/s, about −4%, same TTFT. So graphs are indeed active
+in the MTP verification path and their contribution is small; the per-step overhead that remains is
+elsewhere (PLE gather on the CPU, QSA indexer, draft synchronisation). The "graph cache" patch
+candidate is crossed off. What is left to reach 40+ at short context: `PMIN=0.50` (+10% measured) on
+top of this build `[estimate]` ~43 tok/s; for long context: Unsloth PRs #150/#165 (QSA decode) have
+not been tried.
 
-Catatan: b10798 memuat upstream #28123 "qwen4exp: support recurrent state rollback". `[Inferensi]`
-ini bisa memangkas biaya cache miss token drift (rollback ke checkpoint akhir prompt sebelumnya);
-belum diukur ulang dengan `cache-probe.py`.
+Note: b10798 contains upstream #28123 "qwen4exp: support recurrent state rollback". `[Inference]`
+this could cut the cost of the token-drift cache miss (the rollback to the previous end-of-prompt
+checkpoint); not yet re-measured with `cache-probe.py`.
 
-## 2026-09-06: PR Unsloth #150/#165 (QSA decode di context panjang) — diuji, diport, tidak dipakai
+## 2026-09-06: Unsloth PRs #150/#165 (QSA decode at long context) — tested, ported, not adopted
 
-Dua PR terbuka di fork Unsloth menyasar penurunan decode di context panjang yang kita ukur
-sendiri (39 tok/s di prompt pendek → 27 tok/s di 30–70k pada sesi marked). Klaimnya di kartu
-discrete: #150 menghitung input tata letak QSA sekali per ubatch, bukan 48× per layer
-(decode 131k 16.2 → 21.1 tok/s di 2× RTX 3090); #165 mengganti attention bermask atas seluruh
-cache dengan gather 2 048 cell terpilih (141k: 7.1 → 18–22 tok/s di 2× A6000), plus batching
-top-k CUDA, scan kv-cells, dan mask kompak. Keduanya menargetkan branch
-`qwen4exp/qwen3.8-flash-next` milik fork, bukan tree upstream yang dipakai mix.
+Two open PRs in the Unsloth fork target the long-context decode drop that we measured ourselves
+(39 tok/s at short prompts → 27 tok/s at 30–70k in the marked session). Their claims on the discrete
+cards: #150 computes the QSA layout input once per ubatch instead of 48× per layer (decode at 131k
+16.2 → 21.1 tok/s on 2× RTX 3090); #165 replaces masked attention over the whole cache with a gather
+of 2 048 selected cells (141k: 7.1 → 18–22 tok/s on 2× A6000), plus CUDA top-k batching, a kv-cells
+scan, and a compact mask. Both target the fork's `qwen4exp/qwen3.8-flash-next` branch, not the
+upstream tree used by the mix.
 
-### Temuan sebelum build
+### Findings before building
 
-1. **Ide #150 sudah ada di b10798** dalam bentuk upstream: #27941 (2026-09-01) membagi satu set
-   input QSA ke semua layer (`qsa_inps` di `qwen4exp.cpp`, komentar "the layers sharing a ratio
-   share one input set") dan scan host-nya 865 µs per ubatch di 33k menurut TODO di
-   `llama-memory-hybrid-idx.cpp`. Prebuilt b10715 (terpasang) belum memuatnya. Merge PR-nya ke mix
-   gagal di 11 file (sejarah paralel: pin mix vs branch fork), dan tidak perlu.
-2. **Sparse flash attention upstream (#27970) belum berlaku untuk model ini.** `qwen4exp.cpp`
-   punya satu baris `build_attn_mha(..., top_k->ne[0], ...)` yang dikomentari dengan "TODO: enable
-   sparse attention when we are ready", tetapi kernel CUDA-nya hanya ada untuk head dim 512/576
-   (`may_use_sparse` di `fattn-mma-f16.cuh`, yaitu DeepSeek V4). Mengaktifkan baris itu tidak
-   mengubah apa-apa di sini.
-3. **#165 bisa diport, dengan satu penyesuaian semantik.** Empat file masuk bersih lewat 3-way
-   apply (`qwen4exp.cpp`, `llama-graph.cpp`, `models.h`, `top-k.cu`); hunk `kv-cells.h` usang
-   (fungsinya sudah diganti upstream); `set_input_qsa` mix ditulis ulang total, jadi `mask_row`
-   ditambahkan manual. Shortcut top-k per blok milik PR DIMATIKAN: `blk_cells` di mix hanya memuat
-   grup yang penuh, sel tail yang belum penuh duduk di satu blok cadangan yang barisnya nol, jadi
-   ekspansi blok → sel akan membuang tail dan meng-attend cell 0 berulang. Jalur gather per sel
-   (inti penghematannya) dipertahankan. Hasil: `patches/unsloth-pr165-qsa-gather.diff` (398 baris)
-   di atas tree `build-fork.sh` b10798 + patch crash; build bersih.
+1. **The idea behind #150 is already in b10798** in upstream form: #27941 (2026-09-01) shares one QSA
+   input set across all layers (`qsa_inps` in `qwen4exp.cpp`, with the comment "the layers sharing a
+   ratio share one input set") and its host scan is 865 µs per ubatch at 33k according to a TODO in
+   `llama-memory-hybrid-idx.cpp`. The prebuilt b10715 (installed) does not contain it yet. Merging
+   the PR into the mix fails in 11 files (parallel histories: the mix pins vs the fork branch), and
+   it is unnecessary.
+2. **Upstream sparse flash attention (#27970) does not apply to this model yet.** `qwen4exp.cpp` has
+   a commented-out line `build_attn_mha(..., top_k->ne[0], ...)` with the comment "TODO: enable
+   sparse attention when we are ready", but the CUDA kernel exists only for head dim 512/576
+   (`may_use_sparse` in `fattn-mma-f16.cuh`, i.e. DeepSeek V4). Enabling that line changes nothing
+   here.
+3. **#165 can be ported, with one semantic adjustment.** Four files apply cleanly via a 3-way apply
+   (`qwen4exp.cpp`, `llama-graph.cpp`, `models.h`, `top-k.cu`); the `kv-cells.h` hunk is obsolete
+   (its function has been replaced upstream); the mix's `set_input_qsa` was rewritten entirely, so
+   `mask_row` was added by hand. The PR's per-block top-k shortcut is DISABLED: `blk_cells` in the
+   mix only contains fully populated groups, and the not-yet-full tail cells sit in one spare block
+   whose row is zero, so expanding block → cell would discard the tail and repeatedly attend to cell
+   0. The per-cell gather path (the core of the saving) is kept. Result:
+   `patches/unsloth-pr165-qsa-gather.diff` (398 lines) on top of the `build-fork.sh` b10798 tree +
+   crash patch; clean build.
 
-### Hasil (`runs/longctx-2026-09-06.jsonl`, `bench-longctx.py`, 256 token output, 2 prompt berbeda per titik)
+### Results (`runs/longctx-2026-09-06.jsonl`, `bench-longctx.py`, 256 output tokens, 2 different prompts per point)
 
 | decode tok/s | 8k | 16k | 32k | 64k |
 |---|---|---|---|---|
-| terpasang b10715 `-ub 256`, MTP | 34.7 / 43.6 | 44.4 / 29.2 | 40.6 / 37.8 | 33.2 / 26.0 |
+| installed b10715 `-ub 256`, MTP | 34.7 / 43.6 | 44.4 / 29.2 | 40.6 / 37.8 | 33.2 / 26.0 |
 | b10798+patch `-ub 512`, MTP | 38.0 / 37.2 | 37.1 / 34.3 | 37.0 / 39.4 | 32.5 / 30.1 |
-| port #165 gather ON, MTP | 45.0 / 37.4 | 32.2 / 36.2 | 38.2 / 37.5 | 28.8 / 33.3 |
-| port #165 gather OFF, MTP | 45.1 / 34.4 | 35.3 / 38.9 | 39.9 / 38.0 | 32.5 / 34.1 |
-| port #165 gather ON, **MTP=0** | 24.7 / 24.8 | 23.9 / 24.1 | **22.7 / 22.5** | **19.5 / 19.6** |
-| port #165 gather OFF, **MTP=0** | 24.9 / 24.9 | 23.6 / 23.6 | 21.1 / 21.3 | 16.9 / 16.8 |
+| #165 port, gather ON, MTP | 45.0 / 37.4 | 32.2 / 36.2 | 38.2 / 37.5 | 28.8 / 33.3 |
+| #165 port, gather OFF, MTP | 45.1 / 34.4 | 35.3 / 38.9 | 39.9 / 38.0 | 32.5 / 34.1 |
+| #165 port, gather ON, **MTP=0** | 24.7 / 24.8 | 23.9 / 24.1 | **22.7 / 22.5** | **19.5 / 19.6** |
+| #165 port, gather OFF, **MTP=0** | 24.9 / 24.9 | 23.6 / 23.6 | 21.1 / 21.3 | 16.9 / 16.8 |
 
-Prefill ikut tercatat: 359 tok/s di 64k pada build terpasang, 458–500 di build `-ub 512`
-(efek patch crash, bukan gather; top-k batching #165 tidak terlihat di angka prefill).
+Prefill was recorded too: 359 tok/s at 64k on the installed build, 458–500 on the `-ub 512` build
+(the effect of the crash patch, not the gather; the #165 top-k batching is not visible in the prefill
+numbers).
 
-**Gather-nya bekerja, tapi hanya tanpa MTP.** Dengan `MTP=0` gainnya +7% di 32k dan +15% di 64k,
-nol di 8k (gate `n_kv >= 2×width` belum lewat). Attention atas seluruh cache memang bagian yang
-tumbuh: tanpa gather decode turun 24.9 → 16.9 dari 8k ke 64k, dengan gather 24.7 → 19.5, jadi
-gather mengembalikan sekitar sepertiga dari kehilangan itu, bukan 2.5× seperti di A6000 —
-`[Inferensi]` di GB10 memori unified membuat mask 18 MB/token dan loop host jauh lebih murah,
-sehingga yang tersisa untuk dihemat lebih kecil. Dengan MTP menyala angka gather ON dan OFF
-identik dalam noise (sebaran acceptance draft 0.66–0.96 menggeser decode ±8 tok/s), dan
-penyebabnya ada di kodenya: jalur gather hanya aktif kalau ubatch berisi satu token per stream
-(`gather = n_tokens == n_stream && ...`), sedangkan verifikasi MTP mengirim 1 + draft token
-sekaligus. Jadi pada profil terpasang #165 praktis tidak pernah berjalan.
+**The gather works, but only without MTP.** With `MTP=0` the gain is +7% at 32k and +15% at 64k, zero
+at 8k (the `n_kv >= 2×width` gate is not passed yet). Attention over the whole cache is indeed the
+part that grows: without the gather decode drops 24.9 → 16.9 from 8k to 64k, with the gather
+24.7 → 19.5, so the gather recovers about a third of that loss, not 2.5× as on the A6000 —
+`[Inference]` on the GB10 unified memory makes the 18 MB/token mask and the host loop far cheaper, so
+there is less left to save. With MTP on, the gather ON and OFF numbers are identical within noise
+(the spread of draft acceptance 0.66–0.96 shifts decode by ±8 tok/s), and the reason is in the code:
+the gather path only activates if the ubatch contains one token per stream
+(`gather = n_tokens == n_stream && ...`), whereas MTP verification sends 1 + draft tokens at once. So
+on the installed profile #165 practically never runs.
 
-**Output tetap benar, dalam batas numerik.** Prompt yang benar-benar sama, greedy, `MTP=0`
-(`bench-longctx.py --fixed`, label `qsa-fixed-*`; `tmp/div-*.json` untuk logprobs): 8k, 32k, dan
-48k byte-identik gather ON vs OFF sepanjang 128–160 token. 64k berbeda mulai token ke-8 pada
-pilihan yang hampir seri (`run` −0.64 vs `in` −0.77 nats di satu sisi, terbalik di sisi lain);
-selisih logprob per token sebelum titik itu maksimum 0.18 nats. Itu pola perbedaan jalur numerik
-— gather men-dequantize K/V q8_0 ke F32 lewat `get_rows` lalu F16 untuk flash attention, jalur
-bermask membaca q8_0 langsung — bukan pola sel hilang atau mask salah, yang akan muncul jauh
-lebih awal dan di 32k juga. Konsisten dengan klaim PR (byte-identik di kartu mereka, di mana
-kedua jalur memakai tipe yang sama).
+**The output stays correct, within numerical limits.** Exactly the same prompt, greedy, `MTP=0`
+(`bench-longctx.py --fixed`, labels `qsa-fixed-*`; `tmp/div-*.json` for the logprobs): 8k, 32k and
+48k are byte-identical gather ON vs OFF over 128–160 tokens. 64k differs starting at token 8 on a
+near-tied choice (`run` −0.64 vs `in` −0.77 nats on one side, reversed on the other); the per-token
+logprob difference before that point is at most 0.18 nats. That is the pattern of a different
+numerical path — the gather dequantizes q8_0 K/V to F32 via `get_rows` and then to F16 for flash
+attention, while the masked path reads q8_0 directly — not the pattern of missing cells or a wrong
+mask, which would show up far earlier and at 32k as well. Consistent with the PR's claim
+(byte-identical on their card, where both paths use the same types).
 
-### Ekstensi multi-token (dibuat sesi yang sama, atas permintaan user)
+### Multi-token extension (built in the same session, at the user's request)
 
-Gate PR diganti: gather aktif untuk ubatch sampai 8 token per stream
-(`QWEN4EXP_QSA_GATHER_MAX_TPS`), yaitu decode biasa dan batch verifikasi MTP (1 + draft). K/V
-di-gather per token lewat satu daftar indeks yang diratakan `[n_topk*n_tps]` lalu di-reshape ke
-`[hd, n_head_kv, n_topk, n_tps*ns]`; mask lewat `get_rows` atas `mask_row` yang dilihat sebagai
-`[1, n_kv, n_tps, ns]`; Q terbagi sendiri menjadi `[hd, n_head, 1, n_tps*ns]` karena
-`build_attn_mha` membagi Q menurut `k->ne[3]`. Prompt chunk ratusan token tetap lewat jalur masked.
+The PR's gate was replaced: the gather is active for ubatches of up to 8 tokens per stream
+(`QWEN4EXP_QSA_GATHER_MAX_TPS`), i.e. ordinary decode and the MTP verification batch (1 + draft). K/V
+is gathered per token through a single flattened index list `[n_topk*n_tps]` and then reshaped to
+`[hd, n_head_kv, n_topk, n_tps*ns]`; the mask goes through `get_rows` over `mask_row` viewed as
+`[1, n_kv, n_tps, ns]`; Q splits on its own into `[hd, n_head, 1, n_tps*ns]` because `build_attn_mha`
+splits Q according to `k->ne[3]`. Prompt chunks of hundreds of tokens still take the masked path.
 
-**Benar secara numerik.** Prompt dibuat 31 748 dan 63 492 token (≡ 4 mod 512) supaya chunk prefill
-terakhir berisi 4 token dan lewat jalur gather multi-token; `MTP=0`, greedy, logprobs
-(`tmp/div-mt-*.json`): output 160 token byte-identik gather ON vs OFF di kedua ukuran, selisih
-logprob token pertama 0.000 dan 0.006 nats.
+**Numerically correct.** Prompts were built at 31 748 and 63 492 tokens (≡ 4 mod 512) so that the
+last prefill chunk contains 4 tokens and goes through the multi-token gather path; `MTP=0`, greedy,
+logprobs (`tmp/div-mt-*.json`): 160-token output byte-identical gather ON vs OFF at both sizes, with
+a first-token logprob difference of 0.000 and 0.006 nats.
 
-**Efeknya di bawah MTP, diukur per langkah verifikasi** (tok/s terlalu bergantung acceptance;
+**The effect under MTP, measured per verification step** (tok/s depends too much on acceptance;
 `predicted_ms / (predicted_n − draft_n_accepted)` = ms per step, `runs/longctx-2026-09-06.jsonl`):
 
-| ms per step (2 prompt) | 8k | 16k | 32k | 64k |
+| ms per step (2 prompts) | 8k | 16k | 32k | 64k |
 |---|---|---|---|---|
-| kontrol: b10798+patch, port gather OFF, port 1-token (6 run) | 69–77 | 73–77 | 85–89 | 101–105 |
-| ekstensi, tanpa ambang (`qsa2-gather1-mtp`) | 78.0 / 73.8 | 82.4 / 74.2 | **77.3 / 75.6** | **92.4 / 86.9** |
-| ekstensi + ambang 24k, gather ON (`qsa3-gather1-mtp`) | 74.5 / 69.9 | 71.4 / 78.0 | 77.3 / 83.8 | **86.5 / 92.6** |
-| binary yang sama, `QWEN4EXP_QSA_GATHER=0` (`qsa3-gather0-mtp`) | 68.4 / 74.8 | 79.0 / 76.2 | 85.1 / 81.4 | 96.5 / 101.1 |
+| control: b10798+patch, port gather OFF, 1-token port (6 runs) | 69–77 | 73–77 | 85–89 | 101–105 |
+| extension, no threshold (`qsa2-gather1-mtp`) | 78.0 / 73.8 | 82.4 / 74.2 | **77.3 / 75.6** | **92.4 / 86.9** |
+| extension + 24k threshold, gather ON (`qsa3-gather1-mtp`) | 74.5 / 69.9 | 71.4 / 78.0 | 77.3 / 83.8 | **86.5 / 92.6** |
+| same binary, `QWEN4EXP_QSA_GATHER=0` (`qsa3-gather0-mtp`) | 68.4 / 74.8 | 79.0 / 76.2 | 85.1 / 81.4 | 96.5 / 101.1 |
 
-Tanpa ambang, gather 4 token × 2 304 baris per layer membuat 8k–16k 3–5% lebih lambat, sedangkan
-32k–64k 12–13% lebih cepat; maka gate mendapat ambang `n_kv ≥ 24 576`
-(`QWEN4EXP_QSA_GATHER_MIN_KV`), di antara kedua titik. Dengan ambang itu, A/B di binary yang sama:
-64k **−9%** per step (89.5 vs 98.8 ms), 32k −3%, 16k −4% dan 8k +1% (keduanya jalur masked, jadi
-itu ukuran noise-nya ±4%). Gabungan dua run: 64k 9–13% lebih pendek per step ≈ +10–15% decode pada
-acceptance yang sama; 32k antara 3 dan 12%, tidak pasti; di bawah 24k nol by design. Ini konsisten
-dengan gain `MTP=0` (+7% 32k, +15% 64k).
+Without a threshold, gathering 4 tokens × 2 304 rows per layer makes 8k–16k 3–5% slower, while
+32k–64k are 12–13% faster; so the gate got a threshold of `n_kv ≥ 24 576`
+(`QWEN4EXP_QSA_GATHER_MIN_KV`), between the two points. With that threshold, A/B on the same binary:
+64k **−9%** per step (89.5 vs 98.8 ms), 32k −3%, 16k −4% and 8k +1% (both on the masked path, so that
+is the size of the noise, ±4%). Combining the two runs: 64k is 9–13% shorter per step ≈ +10–15%
+decode at the same acceptance; 32k somewhere between 3 and 12%, uncertain; below 24k zero by design.
+This is consistent with the `MTP=0` gains (+7% at 32k, +15% at 64k).
 
-**Titik 100k** (prompt 99 960 token, binary yang sama, label `qsa3-*` target 100000): gain-nya
-terus membesar dengan kedalaman context.
+**The 100k point** (99 960-token prompt, same binary, labels `qsa3-*` targeting 100000): the gain
+keeps growing with context depth.
 
 | 100k | gather ON | gather OFF |
 |---|---|---|
-| MTP, decode tok/s (2 prompt) | **32.6 / 35.5** | 27.8 / 27.0 |
-| MTP, ms per step verifikasi | **104.8 / 104.5** | 124.5 / 124.6 |
+| MTP, decode tok/s (2 prompts) | **32.6 / 35.5** | 27.8 / 27.0 |
+| MTP, ms per verification step | **104.8 / 104.5** | 124.5 / 124.6 |
 | `MTP=0`, decode tok/s | **16.6** | 13.7 |
 | prefill tok/s | 412–429 | 412–429 |
 
-Per step −16%, decode +21–25%. Dengan gather, decode di 100k setara decode di 64k tanpa gather.
+−16% per step, +21–25% decode. With the gather, decode at 100k equals decode at 64k without it.
 
-**Akurasi di kedalaman itu setara** (`runs/accuracy-2026-09-06.jsonl`, `bench-accuracy-longctx.py`):
-eval biasa tidak menyentuh patch ini karena prompt GSM8K/HumanEval+ hanya 1–2k token, di bawah
-ambang. Maka 100 soal GSM8K pertama (prompt `gsm8k_cot_zeroshot`, thinking off, greedy, seed 1234,
-sama seperti `bench-accuracy.py`) diberi prefix 30 000 token source code yang sama supaya jalur
-gather aktif di setiap jawaban (prefix dilayani prompt cache: rata-rata 29 337 token cached, 753
-di-prefill ulang per soal). Hasil: gather ON **98/100**, gather OFF **97/100**, dua soal yang salah
-sama di keduanya (#93, #98), OFF salah satu lagi (#12). 43/100 respons byte-identik; sisanya beda
-karena greedy + MTP memang tidak deterministik (bagian 2026-09-06 "Greedy tidak deterministik").
-Tanpa prefix, build lama mencetak 96.3% di 300 soal (2026-09-04), jadi prefix 30k tidak merusak
-apa-apa. HumanEval+ tidak diulang: evalplus membangun prompt sendiri, tidak bisa disisipi prefix.
+**Accuracy at that depth is on par** (`runs/accuracy-2026-09-06.jsonl`, `bench-accuracy-longctx.py`):
+the ordinary eval does not touch this patch at all because the GSM8K/HumanEval+ prompts are only
+1–2k tokens, below the threshold. So the first 100 GSM8K problems (prompt `gsm8k_cot_zeroshot`,
+thinking off, greedy, seed 1234, same as `bench-accuracy.py`) were given a 30 000-token prefix of the
+same source code so that the gather path is active for every answer (the prefix is served by the
+prompt cache: on average 29 337 tokens cached, 753 re-prefilled per problem). Result: gather ON
+**98/100**, gather OFF **97/100**, with the two wrong answers being the same in both (#93, #98) and
+OFF getting one more wrong (#12). 43/100 responses byte-identical; the rest differ because greedy +
+MTP simply is not deterministic (the 2026-09-06 section "Greedy is not deterministic"). Without a
+prefix, the old build scored 96.3% over 300 problems (2026-09-04), so a 30k prefix breaks nothing.
+HumanEval+ was not repeated: evalplus builds its own prompts and cannot be given a prefix.
 
-### Keputusan
+### Decision
 
-Tidak jadi default recipe (keputusan user, 2026-09-06): butuh build sendiri, patch-nya pinned ke
-mix b10798 dan hanya kita yang memeliharanya, dan gain-nya baru terasa di atas 24k. Tetapi untuk
-sesi panjang ini profil yang DIREKOMENDASIKAN: `QSA_GATHER=1 ./build-fork.sh` menerapkan
-`patches/unsloth-pr165-qsa-gather.diff` (port #165 + ekstensi multi-token + ambang) di atas mix
-b10798 + patch crash, lalu `FORK=unsloth-qsa UBATCH=512 ./stack.sh start llamacpp`; prebuilt tetap
-default untuk instalasi pertama. Untuk sesi coding yang hidup di 30–70k (marked: 27 tok/s)
-`[estimate]` +10% di ujung atasnya, +25% kalau sampai 100k. Jalan lain tetap menunggu upstream
-mengaktifkan sparse FA untuk head dim model ini (TODO di `qwen4exp.cpp`). `bench-longctx.py` dan
-`bench-accuracy-longctx.py` tinggal untuk mengukur ulang.
+Not made the recipe default (user decision, 2026-09-06): it needs an own build, its patch is pinned
+to the b10798 mix and only we maintain it, and the gain only shows above 24k. But for long sessions
+this is the RECOMMENDED profile: `QSA_GATHER=1 ./build-fork.sh` applies
+`patches/unsloth-pr165-qsa-gather.diff` (the #165 port + multi-token extension + threshold) on top of
+the b10798 mix + crash patch, then `FORK=unsloth-qsa UBATCH=512 ./stack.sh start llamacpp`; the
+prebuilt remains the default for a first installation. For coding sessions that live at 30–70k
+(marked: 27 tok/s) `[estimate]` +10% at the upper end, +25% if it reaches 100k. The other road still
+waits for upstream to enable sparse FA for this model's head dim (the TODO in `qwen4exp.cpp`).
+`bench-longctx.py` and `bench-accuracy-longctx.py` remain for re-measuring.

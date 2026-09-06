@@ -51,19 +51,19 @@ ollama_models() {
 preflight() {
   local need=$1 a m
   if [ -n "$(lc_pid)" ] || vl_up; then
-    echo "!! stack lain masih jalan -- jalankan ./stack.sh stop dulu"; return 1
+    echo "!! another stack is still running -- run ./stack.sh stop first"; return 1
   fi
   m=$(ollama_models)
   if [ "$m" -gt 0 ]; then
-    echo "!! Ollama sedang memegang $m model. Lepaskan dulu:"
-    echo "     ollama stop <nama>    atau    sudo systemctl stop ollama"
+    echo "!! Ollama is holding $m model(s). Release them first:"
+    echo "     ollama stop <name>    or    sudo systemctl stop ollama"
     return 1
   fi
   a=$(avail)
   if [ "$a" -lt "$need" ]; then
-    echo "!! available cuma ${a} GiB, butuh >= ${need} GiB"; return 1
+    echo "!! only ${a} GiB available, need >= ${need} GiB"; return 1
   fi
-  echo ">> preflight ok (available ${a} GiB, Ollama tidak memegang model)"
+  echo ">> preflight ok (${a} GiB available, Ollama holds no model)"
 }
 
 wait_ready() {
@@ -83,8 +83,8 @@ start)
     echo ">> starting llama.cpp fork + MTP (port $LC_PORT), ~45s"
     # -ub 256: the CUDA backend aborts in cublasGemmEx on some prefill batch
     # sizes (367 and 512 seen in a 300-600 sweep; upstream is affected too).
-    # Capping the physical batch at 256 avoided every size in 1-600. See
-    # OPTIMIZATION.md "Crash CUDA pada ukuran batch tertentu".
+    # Capping the physical batch at 256 avoided every size in 1-600.
+    # See OPTIMIZATION.md, 2026-09-04 (the CUDA crash during prefill).
     # Vision projector: on whenever models/mmproj is present (./download-mmproj.sh),
     # VISION=0 forces text-only. Costs ~1 GiB; MTP is unaffected (OPTIMIZATION.md 2026-09-05).
     VIS=(); [ "${VISION:-auto}" != 0 ] && [ -f models/mmproj/mmproj-BF16.gguf ] && VIS=(--vision)
@@ -97,29 +97,29 @@ start)
     if wait_ready "$LC_PORT" 300; then
       echo ">> READY  http://$HOST:$LC_PORT/v1  (used $(used_gib) GiB, available $(avail) GiB)"
     else
-      echo "!! gagal siap; lihat runs/serve-current.log"; tail -12 runs/serve-current.log; exit 1
+      echo "!! not ready in time; see runs/serve-current.log"; tail -12 runs/serve-current.log; exit 1
     fi ;;
   vllm)
     preflight "$NEED_VL" || exit 1
-    echo ">> starting vLLM NVFP4 (port $VL_PORT), ~14 menit"
+    echo ">> starting vLLM NVFP4 (port $VL_PORT), ~14 min"
     nohup vllm-dgx/scripts/serve.sh > runs/serve-current.log 2>&1 &
     if wait_ready "$VL_PORT" 1500; then
       echo ">> READY  http://$HOST:$VL_PORT/v1  (used $(used_gib) GiB, available $(avail) GiB)"
     else
-      echo "!! gagal siap"; docker logs "$VL_NAME" 2>&1 | tail -15; exit 1
+      echo "!! not ready in time"; docker logs "$VL_NAME" 2>&1 | tail -15; exit 1
     fi ;;
   *) echo "usage: $0 start [llamacpp|vllm]"; exit 2 ;;
   esac ;;
 stop)
-  p=$(lc_pid); [ -n "$p" ] && { kill "$p"; echo ">> llama-server ($p) dihentikan"; }
-  vl_up && { docker rm -f "$VL_NAME" >/dev/null; echo ">> container $VL_NAME dihapus"; }
+  p=$(lc_pid); [ -n "$p" ] && { kill "$p"; echo ">> llama-server ($p) stopped"; }
+  vl_up && { docker rm -f "$VL_NAME" >/dev/null; echo ">> container $VL_NAME removed"; }
   for _ in $(seq 1 40); do [ -z "$(lc_pid)" ] && ! vl_up && break; sleep 3; done
-  sleep 2; echo ">> available sekarang $(avail) GiB" ;;
+  sleep 2; echo ">> $(avail) GiB available now" ;;
 status)
   p=$(lc_pid)
-  if [ -n "$p" ]; then echo "llama.cpp : JALAN (pid $p, port $LC_PORT)"; else echo "llama.cpp : mati"; fi
-  if vl_up; then echo "vLLM      : JALAN (port $VL_PORT)"; else echo "vLLM      : mati"; fi
-  echo "Ollama    : $(ollama_models) model ter-load"
-  echo "memori    : available $(avail) GiB dari 121 GiB" ;;
+  if [ -n "$p" ]; then echo "llama.cpp : running (pid $p, port $LC_PORT)"; else echo "llama.cpp : stopped"; fi
+  if vl_up; then echo "vLLM      : running (port $VL_PORT)"; else echo "vLLM      : stopped"; fi
+  echo "Ollama    : $(ollama_models) model(s) loaded"
+  echo "memory    : $(avail) GiB available of 121" ;;
 *) echo "usage: $0 {start [llamacpp|vllm]|stop|status}"; exit 2 ;;
 esac

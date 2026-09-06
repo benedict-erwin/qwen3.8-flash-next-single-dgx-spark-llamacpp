@@ -1,5 +1,10 @@
 # Riset: Qwen3.8-Flash-Next di DGX Spark GB10 128GB
 
+> **Historical working notes (2026-08-31, in Indonesian):** the initial survey of quant
+> candidates and serving stacks that led to the choice documented in `README.md` and
+> `OPTIMIZATION.md`. Kept as written; the current, English record of what was actually
+> measured is `README.md`, with the full method in `OPTIMIZATION.md`.
+
 > Tanggal: 2026-08-31. Target user: muat "agak longgar" di 128GB unified memory, retensi akurasi > 90%, tps setinggi mungkin; bonus varian abliterated/zero-refusal yang tetap akurat.
 
 ## Fakta model

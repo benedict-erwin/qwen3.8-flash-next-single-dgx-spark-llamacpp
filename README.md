@@ -23,7 +23,7 @@ number links to the file it came from; none is typed from memory.
 
 | | Value | Source |
 |---|---|---|
-| Config | Unsloth fork `b10715`, UD-Q4_K_XL, MTP head Q8_0 `--nmax 3` `--pmin 0.50`, KV q8_0, context 131k, `-ub 256`, vision projector | `stack.sh`, `serve.sh` |
+| Config | Unsloth fork `b10715`, UD-Q4_K_XL, MTP head Q8_0 `--nmax 3` `--pmin 0.50`, KV q8_0, context 131k, `-ub 256`, vision projector when `download-mmproj.sh` has run | `stack.sh`, `serve.sh` |
 | TTFT, 10.9k-token prompt | 26.2 s cold, 1.8 s on a prefix-cache hit | `runs/bench-stream2.jsonl` |
 | Decode, benchmark | 36.7 tok/s at p-min 0.75 (median of 2, `-ub 256`); p-min 0.50, the default since 2026-09-06, measured +10% on matched prompts | `runs/bench-stream2.jsonl` |
 | Decode, real coding sessions | 33.0 tok/s at ≤40k context; 27.0 tok/s at 30–70k | `runs/cache-ratio-2026-09-05.jsonl`, `runs/cache-ratio-2026-09-06-marked.jsonl` |
@@ -85,7 +85,7 @@ labels `b10798fix-*`): cold TTFT on the 10.9k prompt 26.2 → 21.1 s, decode 36.
 tok/s (the newer upstream base adds MoE and attention fusions), and the 1..600 ubatch
 sweep that crashes the prebuilt at 367 and 512 runs clean. Everything else (MTP, images,
 `PMIN`) is identical because only the binary directory changes. `TAG=b10715-mix-86bd2d3`
-rebuilds the shipped prebuilt's base instead (23.4 s / 36.2 tok/s, also clean).
+rebuilds the shipped prebuilt's base instead (23.4 s / 36.1 tok/s, also clean).
 
 Two warnings from getting there, in `OPTIMIZATION.md`: the fork's release tags are
 manifests, not source trees, so cloning a tag and building it does not give you the
@@ -139,6 +139,12 @@ but `CUDA_LAUNCH_BLOCKING=1` later pinned the real culprit: the MMQ `MUL_MAT_ID`
 upstream issue #27792, whose one-line fix (#27044) is still unmerged. Until it lands, the
 workaround costs ~4 s of cold TTFT; the optional build above removes the crash without
 that cost. Details and the sweeps in `OPTIMIZATION.md`.
+
+llama-server picks its slot count automatically, which is 4 slots sharing one KV pool
+here. With `draft-mtp` on, parallel slots can contaminate each other (upstream issue
+ggml-org/llama.cpp#28286, open as of 2026-09-06; it cost a point of GSM8K in the 4-slot
+run). For a single user that only matters if several agents talk to the server at once;
+`LLAMA_ARG_N_PARALLEL=1 ./stack.sh start llamacpp` turns it into a one-request queue.
 
 ## Images
 
@@ -374,15 +380,16 @@ copy what you like, ignore the rest. [`pi/README.md`](pi/README.md) explains eac
 | Script | Purpose |
 |---|---|
 | `stack.sh` | start / stop / status for either backend, with a memory preflight |
-| `serve.sh` | launches llama-server directly (`--mtp`, `--vision`, `--ngram-mod`, `--mmap`, `CTX=`, `BUILD=`, `UBATCH=`) |
+| `serve.sh` | launches llama-server directly (`--mtp`, `--nmax`, `--pmin`, `--vision`, `--ngram-mod`, `--mmap`, `CTX=`, `BUILD=`, `FORK=`, `UBATCH=`) |
 | `download-parts.sh` | main GGUF, 104 GiB |
 | `download-mtp.sh` | MTP draft head, 3.85 GiB |
 | `download-mmproj.sh` | vision projector, 0.85 GiB — enables images |
 | `download-fork.sh` | Unsloth llama.cpp prebuilt — required for MTP (`TAG=` for another release) |
 | `build-fork.sh` | rebuild that prebuilt's exact composition from source with the one-line MMQ crash fix; `QSA_GATHER=1` adds the long-context gather patch (`patches/`) |
+| `bench.sh` | short-prompt decode/prefill benchmark against llama.cpp; superseded by `bench-stream.py` |
 | `bench-code.sh` | coding-shaped benchmark against llama.cpp |
 | `bench-stream.py` | streaming benchmark; the only one valid for comparing across backends |
-| `bench-longctx.py` | decode speed against context depth (8k–64k) from llama-server's own timings; llama.cpp A/B only, `--fixed` for byte-identity checks |
+| `bench-longctx.py` | decode speed against context depth (8k–64k by default, `--sizes`) from llama-server's own timings; llama.cpp A/B only, `--fixed` for byte-identity checks |
 | `cache-ratio.py` | prefix-cache hit rate of real usage, reconstructed from the llama-server log |
 | `cache-probe.py` | does resending a turn hit the prefix cache? Generates each turn shape (text, tool call, streaming...), resends it as a client would, reads `cached_tokens`, and diffs the re-rendered history against the generated tokens |
 | `bench-accuracy.py` | GSM8K + HumanEval+ through the API, same settings on either backend |

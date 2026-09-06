@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Serve Qwen3.8-Flash-Next UD-Q4_K_XL on DGX Spark GB10.
-# Default = the measured baseline (21.8 tok/s on 2026-09-01): GPU experts,
-# PLE n-gram table pinned to CPU, KV cache q8_0, no speculative decoding.
+# Without flags: GPU experts, PLE n-gram table pinned to CPU, KV cache q8_0, no
+# speculative decoding. stack.sh adds the shipped profile on top (--mtp --nmax 3
+# --pmin 0.50, UBATCH=256, --vision when the projector exists); see README.
 #
 # Usage: ./serve.sh [--ngram-mod] [--mtp] [--mmap] [--vision] [--nmax N]
 #   --ngram-mod  n-gram speculative decoding (free, no extra model)
@@ -58,7 +59,7 @@ CTX="${CTX:-131072}"
 # gguf path as the model id, which some harnesses reject or mangle.
 ALIAS="${ALIAS:-qwen3.8-flash-next}"
 # Physical batch size for prefill. Unset = llama.cpp default (2048 logical / 512
-# physical). See OPTIMIZATION.md "Crash CUDA pada ukuran batch tertentu".
+# physical). See OPTIMIZATION.md, 2026-09-04 (the CUDA crash during prefill).
 UBATCH="${UBATCH:-}"
 
 EXTRA=()

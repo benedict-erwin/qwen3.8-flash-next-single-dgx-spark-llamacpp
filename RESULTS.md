@@ -1,5 +1,12 @@
 # Hasil benchmark opsi A di DGX Spark GB10 (2026-09-01)
 
+> **Historical working notes (2026-09-01, in Indonesian):** the first benchmark run on
+> this machine, since superseded and kept only for history — its numbers are not the
+> shipped ones. The three methodology defects behind its numbers (repeated prompts at
+> temperature 0, SSE chunks counted as tokens, a wrong `model` field) are explained in
+> `OPTIMIZATION.md`, which also carries the current, English record of every measurement.
+> The Indonesian banner below corrects a separate claim in this file.
+
 > **KOREKSI 2026-09-02 — baca `OPTIMIZATION.md`.** Kesimpulan "MTP tidak on the table"
 > di bawah **tidak berlaku lagi**. MTP head Flash-Next tersedia sebagai file sidecar
 > terpisah (Unsloth `MTP/mtp-*-shared-Q8_0.gguf`, 2.60 GB) yang dipasang dengan `-md`
