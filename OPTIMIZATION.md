@@ -472,15 +472,29 @@ dalam ubatch 2048/512 penuh; hanya ubatch terakhir yang berukuran acak, dan tiga
 tidak cukup untuk menabraknya. Coding agent yang mengirim ratusan prompt beragam **akan**
 menabraknya cepat atau lambat — 468 request eval menabraknya di request ke-369.
 
-**2026-09-06, jalur env runtime dicoba dan gagal.** Build ini punya `GGML_CUDA_CUBLAS_COMPUTE_TYPE`
-(f32 / bf16 / f16 / auto) yang mengganti compute type di `ggml_cuda_mul_mat_cublas`. Diuji pada
-`-ub 512` dengan probe token mentah ukuran 367 (`runs/crash-sweep-2026-09-04.jsonl`, entri
-2026-09-06): kontrol crash, dan **ketiga compute type crash di ukuran yang sama**, di
-`cublasGemmEx` yang sama. Jadi bukan soal presisi akumulasi; panggilan cuBLAS untuk shape itu gagal
-apa pun compute type-nya. `GGML_CUDA_FORCE_MMQ` (matmul terkuantisasi memakai kernel ggml sendiri,
-tanpa cuBLAS) di build ini hanya ada sebagai opsi compile-time, jadi satu-satunya jalur yang tersisa
-tanpa menunggu upstream adalah build fork dari source dengan `-DGGML_CUDA_FORCE_MMQ=ON` — opsi C di
-tracker. `-ub 256` tetap mitigasi yang dipakai.
+**2026-09-06, kernel yang sebenarnya gagal: `MUL_MAT_ID`, bukan cuBLAS.** Diuji ulang pada `-ub 512`
+dengan probe token mentah ukuran 367 (`runs/crash-sweep-2026-09-04.jsonl`, entri 2026-09-06):
+`GGML_CUDA_CUBLAS_COMPUTE_TYPE` f32 / bf16 / f16 semuanya crash di ukuran yang sama, dan kali ini
+error-nya "illegal memory access" yang muncul di `launch_mul_mat_q`, bukan "internal operation
+failed" di `cublasGemmEx` seperti tanggal 4. Error CUDA jenis ini asinkron, lokasi yang dilaporkan
+adalah panggilan berikutnya yang kebetulan memeriksa status, jadi kedua laporan itu tidak menunjuk
+kernel yang salah. Dengan `CUDA_LAUNCH_BLOCKING=1` (error jadi sinkron) pelakunya terbaca pasti:
+
+```
+ggml_cuda_compute_forward: MUL_MAT_ID failed
+CUDA error: an illegal memory access was encountered
+```
+
+`MUL_MAT_ID` = matmul expert MoE lewat kernel MMQ ggml (Q4_K experts). Ini persis
+**ggml-org/llama.cpp#27792** (masih OPEN): tail padding buffer `src1_q8_1` di jalur `mul_mat_id`
+dihitung dari `ne11` yang selalu 1 untuk MoE, sehingga tile terakhir expert terakhir membaca lewat
+akhir alokasi; terlihat atau tidak bergantung slack pool VMM, karena itu hanya ukuran ubatch
+tertentu (367, 512) dan bergantung data (routing expert). Fix-nya sudah ada sebagai PR
+**#27044** ("size MMQ ids-path tail padding from the flattened row count") — dibuka 2026-08-13,
+belum di-merge. Laporan #28377 kami dengan demikian duplikat dari #27792 dengan gejala yang
+lokasinya menyesatkan. Konsekuensi: `GGML_CUDA_FORCE_MMQ` justru jalur yang salah;
+`GGML_CUDA_FORCE_CUBLAS` (compile-time) atau patch #27044 di build sendiri yang akan menghindarinya.
+Prebuilt Unsloth yang lebih baru (`b10798-mix-659e406`, 2026-09-04) diuji di bawah.
 
 Dilaporkan ke upstream sebagai **ggml-org/llama.cpp#28377** (2026-09-04) dengan reproduksi
 sweep di atas. Kandidat terkait: #28251 (call site sama, `cublasGemmEx` di jalur MoE, status

@@ -5,11 +5,14 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
-TAG=b10715-mix-86bd2d3
+TAG="${TAG:-b10715-mix-86bd2d3}"   # TAG=<other release tag> to fetch a newer prebuilt side by side
 ASSET="app-${TAG}-linux-arm64-cuda13-portable.tar.gz"
 URL="https://github.com/unslothai/llama.cpp/releases/download/${TAG}/${ASSET}"
-SIZE=188945299
-DEST=forks/unsloth-b10715
+# Exact asset size for the pinned tag; any other TAG asks GitHub (Content-Length after the redirect).
+if [ "$TAG" = "b10715-mix-86bd2d3" ]; then SIZE=188945299
+else SIZE=$(curl -sIL "$URL" | grep -i '^content-length' | tail -1 | tr -dc '0-9'); [ -n "$SIZE" ] || { echo "cannot read asset size for $TAG" >&2; exit 1; }
+fi
+DEST="forks/unsloth-${TAG%%-*}"
 
 if [ -x "$DEST/llama-server" ]; then
   echo "[skip] $DEST/llama-server already present"; exit 0

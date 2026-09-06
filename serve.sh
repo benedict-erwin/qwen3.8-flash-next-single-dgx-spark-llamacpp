@@ -20,7 +20,8 @@ cd "$(dirname "$0")"
 # output_hc_norm.weight / token_embd.weight. See OPTIMIZATION.md.
 BUILD="${BUILD:-build-new}"
 if [[ "$BUILD" == "fork" ]]; then
-  FORKDIR=forks/unsloth-b10715
+  # FORK=unsloth-b10798 (etc.) selects another prebuilt fetched with TAG=... ./download-fork.sh
+  FORKDIR="forks/${FORK:-unsloth-b10715}"
   BIN="$FORKDIR/llama-server"
   export LD_LIBRARY_PATH="$PWD/$FORKDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 else
