@@ -872,3 +872,61 @@ Konsekuensi praktis:
 Dua hal lain dari issue Mia yang tidak berlaku di sini: blok attention QSA 3 200 token yang membuat
 prefix-cache hit mustahil di bawah ~6 400 token prompt — di llama.cpp probe kita hit pada prompt
 100 token; dan recital verbatim belum kita amati di sesi coding (acceptance 0.84–0.86, bukan 0.93).
+
+---
+
+## 2026-09-06: Opsi C dikerjakan — build sendiri dengan patch, crash hilang, kecepatan setara prebuilt
+
+Pertanyaan yang dijawab: bisakah "cara Mia" (patch runtime + build sendiri) dipakai di llama.cpp
+untuk menghilangkan crash `MUL_MAT_ID` tanpa `-ub 256`, dan berapa harganya. Jawabannya: bisa, satu
+baris patch, dan setelah komposisi source-nya benar, tanpa kehilangan kecepatan. Tapi jalan ke sana
+mengajarkan beberapa hal tentang binari prebuilt Unsloth yang tidak terlihat dari luar.
+
+### Yang dicoba, urut kronologis (`runs/bench-stream2.jsonl`, label di kolom pertama; probe crash =
+token mentah ukuran 367/512 pada `-ub 512`; server restart per baris)
+
+| Label | Source | Compiler | Crash 367 | TTFT 10.9k | Decode |
+|---|---|---|---|---|---|
+| `llamacpp-mtp-ub256` | prebuilt b10715 (profil terpasang) | nvcc 13.3 (CI) | dihindari via ub 256 | 26.2 s | 36.7 |
+| `llamacpp-mtp-ub512` | prebuilt b10715 | — | **crash** | 21.9 s | 37.2 |
+| `b10798-ub256` | prebuilt b10798 (2026-09-04) | — | crash di ub 512 | 25.8 s | 39.3 |
+| `mmqfix-ub512` | branch `mtp/qwen4exp-nextn` + patch | nvcc 13.0 | **tidak crash**, sweep 1–600 bersih | 33.6 s | 33.1 |
+| `mmqfix-cub-ub512/256` | sama + CUB 3.2 | nvcc 13.0 | tidak crash | 36.1 / 38.7 s | 33.6 / 35.1 |
+| `mmqfix-n133-ub512/256` | sama + CUB 3.2 | nvcc 13.3 (redist lokal) | tidak crash | 36.0 / 41.5 s | 34.8 / 34.2 |
+| **`mixfix-ub256`** | **mix b10715 dirakit ulang + patch** | nvcc 13.0 | — | **26.1 s** | **38.0** |
+| **`mixfix-ub512`** | sama | nvcc 13.0 | **tidak crash** | **23.4 s** | **36.2** |
+
+### Tiga hal yang dipelajari
+
+1. **Tag rilis "mix" Unsloth bukan pohon source.** `git clone --branch b10715-mix-86bd2d3` memberi
+   commit manifest tanpa `qwen4exp`. Binari prebuilt dirakit CI dari upstream b10715 + 14 commit PR
+   yang dipin di `scripts/unsloth/pr-set.json`, di-merge berurutan, konflik add/add diselesaikan
+   `additive_merge.py` mereka. `patches/compose-mix.py` mengulang proses itu secara lokal; hasilnya
+   commit yang berbeda hash-nya tapi isinya sama, dan ke-14 merge bersih (dua lewat resolusi add/add).
+2. **Branch MTP fork (`mtp/qwen4exp-nextn`) bukan pengganti yang setara.** Build dari branch itu
+   memperbaiki crash tapi prefill 30–50% lebih lambat dan decode −10%, dan itu **bukan** karena
+   compiler: nvcc 13.0 vs 13.3, CUB 3.0 vs 3.2, dan konfigurasi CPU backend semuanya dicoba tanpa
+   efek. Basis upstream juga bukan (prebuilt b10798 lebih baru dan justru tercepat). Selisihnya ada di
+   komposisi source: branch itu membawa commit MTP yang berbeda dari #144 versi repin di mix (antara
+   lain "key the CUDA graph cache by shape" dan jalur *borrow target tensors* dari PR #142 yang tidak
+   ada di mix). `[Inferensi]` mana persisnya yang lambat belum diisolasi; tidak perlu, karena mix
+   yang dirakit ulang sudah setara prebuilt.
+3. **Harness memori.** Build `nvcc -j8` di samping server 91 GiB ternyata aman di sistem (tanpa
+   `NV_ERR_NO_MEMORY`), tapi pengaman memori Claude Code beberapa kali mematikan proses build; solusi
+   praktisnya menjalankan build detached (`setsid nohup`) dengan server dihentikan.
+
+### Hasil dan artefak
+
+- `patches/mmq-ids-tail-padding.patch`: satu baris di `ggml/src/ggml-cuda/mmq.cu`, identik dengan
+  PR #27044 upstream, hanya untuk jalur `mul_mat_id` (baris dense path dibiarkan).
+- `patches/compose-mix.py` + `build-fork.sh`: clone upstream penuh, rakit mix sesuai manifest tag,
+  apply patch, build (`GGML_CUDA_CUB_3DOT2=ON`, arch native), hasil di `forks/unsloth-mixfix/`.
+  Skrip menolak kalau patch tidak lagi cocok, jadi fix upstream akan terlihat.
+- Pemakaian: `FORK=unsloth-mixfix UBATCH=512 ./stack.sh start llamacpp`. Semua fitur lain (MTP,
+  vision, `--pmin`) sama karena `serve.sh` hanya mengganti direktori binari.
+- Keuntungan terukur vs profil terpasang: TTFT cold 26.2 → 23.4 s (−11%) pada prompt 10.9k, decode
+  setara, dan yang utama: **tidak ada lagi ukuran ubatch yang crash**. Sweep 1–600 pada `-ub 512`:
+  **600/600 ukuran lolos, 0 baris `CUDA error` di log**, dan bench ulang setelah sweep 23.5 s / 36.0 tok/s.
+- Profil terpasang **tidak diubah**: prebuilt + `-ub 256` tetap default karena tidak butuh build.
+  Ini opsi untuk yang mau, dan menjadi tidak perlu begitu #27044 di-merge upstream dan masuk ke
+  prebuilt Unsloth.

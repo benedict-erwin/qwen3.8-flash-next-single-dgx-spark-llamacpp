@@ -70,6 +70,32 @@ session. `nmax 4` was also tried: +2.5%, within noise, not adopted. Note that wi
 greedy output is not bit-reproducible at either setting (`OPTIMIZATION.md`, 2026-09-06);
 `MTP=0 ./stack.sh start llamacpp` restores exact reproducibility at ~24 tok/s.
 
+### Optional: build it yourself to drop `-ub 256`
+
+The prefill crash that forces `-ub 256` is upstream issue ggml-org/llama.cpp#27792: the
+MMQ `mul_mat_id` path under-sizes a buffer, and whether the out-of-bounds read is visible
+depends on the allocator, hence only some ubatch sizes die. Its fix (PR #27044) is one
+line and unmerged as of 2026-09-06, so no prebuilt carries it yet. `build-fork.sh`
+reproduces the Unsloth prebuilt's exact source composition (upstream tag + the PR set the
+fork pins) on this machine, applies the line, and builds it:
+
+```bash
+./build-fork.sh                                   # ~15 min, ~1.3 GB of source clones
+FORK=unsloth-mixfix UBATCH=512 ./stack.sh start llamacpp
+```
+
+Measured 2026-09-06 (`runs/bench-stream2.jsonl`, labels `mixfix-*`): cold TTFT on the
+10.9k prompt 26.2 → 23.4 s, decode unchanged (38.0 / 36.2 tok/s at ub 256 / 512), and the
+1..600 ubatch sweep that crashes the prebuilt at 367 and 512 runs clean. Everything else
+(MTP, images, `PMIN`) is identical because only the binary directory changes.
+
+Two warnings from getting there, in `OPTIMIZATION.md`: the fork's release tags are
+manifests, not source trees, so cloning a tag and building it does not give you the
+prebuilt; and building the fork's MTP *branch* instead fixes the crash but is 30–50%
+slower at prefill for reasons that are not the compiler. The shipped profile stays on
+the prebuilt with `-ub 256` because it needs no build; this path becomes moot once
+#27044 lands upstream and in a prebuilt.
+
 ## Quick start
 
 First-time setup (downloads ~110 GB) is in [`SETUP.md`](SETUP.md). Once that is done:
@@ -329,7 +355,8 @@ copy what you like, ignore the rest. [`pi/README.md`](pi/README.md) explains eac
 | `download-parts.sh` | main GGUF, 104 GiB |
 | `download-mtp.sh` | MTP draft head, 3.85 GiB |
 | `download-mmproj.sh` | vision projector, 0.85 GiB — enables images |
-| `download-fork.sh` | Unsloth llama.cpp prebuilt — required for MTP |
+| `download-fork.sh` | Unsloth llama.cpp prebuilt — required for MTP (`TAG=` for another release) |
+| `build-fork.sh` | rebuild that prebuilt's exact composition from source with the one-line MMQ crash fix (`patches/`) |
 | `bench-code.sh` | coding-shaped benchmark against llama.cpp |
 | `bench-stream.py` | streaming benchmark; the only one valid for comparing across backends |
 | `cache-ratio.py` | prefix-cache hit rate of real usage, reconstructed from the llama-server log |
