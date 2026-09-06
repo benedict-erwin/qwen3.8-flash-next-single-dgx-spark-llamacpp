@@ -88,9 +88,11 @@ start)
     # Vision projector: on whenever models/mmproj is present (./download-mmproj.sh),
     # VISION=0 forces text-only. Costs ~1 GiB; MTP is unaffected (OPTIMIZATION.md 2026-09-05).
     VIS=(); [ "${VISION:-auto}" != 0 ] && [ -f models/mmproj/mmproj-BF16.gguf ] && VIS=(--vision)
-    # NMAX / PMIN override the measured defaults (3 / 0.75) for speculative sweeps; MTP=0 disables
+    # NMAX / PMIN override the measured defaults (3 / 0.50) for speculative sweeps; MTP=0 disables
     # speculative decoding entirely (diagnostics only -- decode drops to ~24 tok/s).
-    SPEC=(--mtp --nmax "${NMAX:-3}" --pmin "${PMIN:-0.75}"); [ "${MTP:-1}" = 0 ] && SPEC=()
+    # p-min 0.50 has been the default since 2026-09-06: +10% decode over 0.75 on matched prompts,
+    # same answers (the target verifies every draft). PMIN=0.75 restores the old behaviour.
+    SPEC=(--mtp --nmax "${NMAX:-3}" --pmin "${PMIN:-0.50}"); [ "${MTP:-1}" = 0 ] && SPEC=()
     UBATCH="${UBATCH:-256}" BUILD=fork nohup ./serve.sh "${SPEC[@]}" "${VIS[@]}" > runs/serve-current.log 2>&1 &
     if wait_ready "$LC_PORT" 300; then
       echo ">> READY  http://$HOST:$LC_PORT/v1  (used $(used_gib) GiB, available $(avail) GiB)"

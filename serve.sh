@@ -10,7 +10,7 @@
 #   --vision     load the vision projector so /v1/chat/completions accepts image_url
 #                (needs ./download-mmproj.sh first)
 #   --nmax N     max draft tokens per step (default 2)
-#   --pmin P     min draft probability to keep a draft token (default 0.75; --mtp only)
+#   --pmin P     min draft probability to keep a draft token (default 0.50 since 2026-09-06; --mtp only)
 #   BUILD=build  use the old 5d4a3be binary instead of build-new
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -36,7 +36,7 @@ MTP=models/MTP/mtp-Qwen3.8-Flash-Next-Q8_0.gguf
 MMPROJ=models/mmproj/mmproj-BF16.gguf
 PORT=18080
 NMAX=2
-PMIN=0.75
+PMIN=0.50
 # Bind address. Default stays loopback so local benchmarking is unchanged.
 #   HOST=tailscale  -> bind to this node's tailnet IP only: reachable from every
 #                      device on the tailnet (and directly over LAN when they are

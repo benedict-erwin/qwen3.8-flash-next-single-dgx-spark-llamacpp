@@ -23,9 +23,9 @@ number links to the file it came from; none is typed from memory.
 
 | | Value | Source |
 |---|---|---|
-| Config | Unsloth fork `b10715`, UD-Q4_K_XL, MTP head Q8_0 `--nmax 3`, KV q8_0, context 131k, `-ub 256`, vision projector | `stack.sh`, `serve.sh` |
+| Config | Unsloth fork `b10715`, UD-Q4_K_XL, MTP head Q8_0 `--nmax 3` `--pmin 0.50`, KV q8_0, context 131k, `-ub 256`, vision projector | `stack.sh`, `serve.sh` |
 | TTFT, 10.9k-token prompt | 26.2 s cold, 1.8 s on a prefix-cache hit | `runs/bench-stream2.jsonl` |
-| Decode, benchmark | 36.7 tok/s (median of 2, `-ub 256`) | `runs/bench-stream2.jsonl` |
+| Decode, benchmark | 36.7 tok/s at p-min 0.75 (median of 2, `-ub 256`); p-min 0.50, the default since 2026-09-06, measured +10% on matched prompts | `runs/bench-stream2.jsonl` |
 | Decode, real coding sessions | 33.0 tok/s at ≤40k context; 27.0 tok/s at 30–70k | `runs/cache-ratio-2026-09-05.jsonl`, `runs/cache-ratio-2026-09-06-marked.jsonl` |
 | Prefix-cache hit, real sessions | 95.9% (23 requests); 99.1%, 0 cold (94 requests) | same two files |
 | MTP draft acceptance, real sessions | 0.86 | same two files |
@@ -41,34 +41,29 @@ cache because the generated tokens are not the canonical tokenisation of their t
 on this hybrid model such a miss re-prefills the whole previous response — 7 s after a
 2.6k-token answer, 37 s after a 16k one (`OPTIMIZATION.md`, 2026-09-06).
 
-### Optional: `PMIN=0.50` for ~10% faster decode
+### `p-min 0.50`: the speculative threshold, and why it is the default
 
 The MTP drafter proposes up to 3 tokens per step and stops early when its confidence for
-the next token drops below `--spec-draft-p-min`. The recipe ships 0.75. Measured on
-2026-09-06 (`runs/bench-stream2.jsonl`, labels `sweepA2-*`, three fresh-cache restarts per
-side, identical prompts):
+the next token drops below `--spec-draft-p-min`. The recipe shipped 0.75 until
+2026-09-06; it now ships 0.50, measured as follows (`runs/bench-stream2.jsonl`, labels
+`sweepA2-*`, three fresh-cache restarts per side, identical prompts):
 
-| | p-min 0.75 (default) | p-min 0.50 |
+| | p-min 0.75 | p-min 0.50 (default) |
 |---|---|---|
 | decode, same code prompt, 3 restarts | 34.0 / 36.0 / 35.0 tok/s | 39.0 / 39.1 / 38.1 tok/s |
 | draft acceptance | 0.93 | 0.84 |
 | accepted draft tokens per step | 3.21 | 3.30 |
-| TTFT | unchanged | unchanged |
-
-```bash
-PMIN=0.50 ./stack.sh start llamacpp
-```
+| TTFT, RAM | unchanged | unchanged |
 
 **What it does not change:** the answer. The target model verifies every drafted token and
 keeps only what it would have produced itself, so p-min sets how much draft work is
-wasted, not what comes out. **What it costs:** more rejected drafts (acceptance 0.93 →
-0.84, each one a wasted read of the draft head), so the gain shrinks on text the drafter
-predicts badly. Coding-agent traffic is easy for it — real sessions here run at 0.84–0.91
-acceptance even at 0.75, far above the ~0.4 where a lower p-min would start to lose — but
-the 0.50 figure has only been measured on benchmark prompts, not yet on a full agent
-session. `nmax 4` was also tried: +2.5%, within noise, not adopted. Note that with MTP on,
-greedy output is not bit-reproducible at either setting (`OPTIMIZATION.md`, 2026-09-06);
-`MTP=0 ./stack.sh start llamacpp` restores exact reproducibility at ~24 tok/s.
+wasted, not what comes out. **What it costs:** more rejected drafts, so the gain shrinks on
+text the drafter predicts badly. Coding-agent traffic is easy for it — real sessions here
+run at 0.84–0.91 acceptance even at 0.75, far above the ~0.4 where a lower p-min would
+start to lose. `PMIN=0.75 ./stack.sh start llamacpp` restores the old setting; `nmax 4`
+was also tried (+2.5%, within noise, not adopted). With MTP on, greedy output is not
+bit-reproducible at either setting (`OPTIMIZATION.md`, 2026-09-06); `MTP=0` restores exact
+reproducibility at ~24 tok/s.
 
 ### Optional: build it yourself to drop `-ub 256`
 

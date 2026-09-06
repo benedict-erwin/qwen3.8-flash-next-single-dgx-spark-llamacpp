@@ -824,6 +824,9 @@ prompt yang sama, tiga restart berturut-turut, rentangnya tidak tumpang tindih (
 38.1–39.1). `nmax` 4 tidak membantu; sisa gain dari p-min 0.50 sekitar +10%, bukan +25% seperti
 reduced-vocab drafting di vLLM.
 
+**Keputusan (2026-09-06, setelah opsi C):** `p-min 0.50` dijadikan default di `stack.sh`/`serve.sh`;
+`PMIN=0.75` mengembalikan yang lama.
+
 **Anomali "prompt `speculative.cpp` → 1 token" TERJAWAB (item lama di tracker).** Di semua 11 start
 sweep ini, request pertama (warm-up, prompt `speculative.cpp`, 10 892 token) berakhir setelah 1 token,
 dan run ke-3 (prompt yang sama, cache RAM mengembalikan state → hanya 4 token di-prefill) juga
