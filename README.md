@@ -127,6 +127,12 @@ First-time setup (downloads ~110 GB) is in [`SETUP.md`](SETUP.md). Once that is 
 ./stack.sh help             # every command, flag and env var, and what each needs
 ```
 
+Settings you always use can go into `stack.local` (plain `KEY=value` lines, gitignored,
+listed by `./stack.sh status`), so the long form
+`FORK=unsloth-qsa UBATCH=512 CTX=262144 LLAMA_ARG_N_PARALLEL=1 ./stack.sh start llamacpp`
+becomes `./stack.sh start llamacpp`. An explicit environment variable still wins over the
+file. `API_KEY` can live there too; `chmod 600 stack.local` if it does.
+
 `./stack.sh start llamacpp --clock-cap` additionally caps the GPU clock at 2200 MHz
 (`sudo nvidia-smi -lgc 0,2200`, so it asks for your password). Decode on GB10 is
 memory-bandwidth bound, so community measurements on vLLM put the cost at about 1%

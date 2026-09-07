@@ -31,6 +31,10 @@ Why these values, all from measurements in `../OPTIMIZATION.md`:
 
 None of these change the recipe's defaults; each is one setting on your side.
 
+- **Keep your server settings in `stack.local`.** Plain `KEY=value` lines next to
+  `stack.sh` (gitignored) apply to every start, so `FORK=unsloth-qsa UBATCH=512
+  CTX=262144 LLAMA_ARG_N_PARALLEL=1 ./stack.sh start llamacpp` shrinks to
+  `./stack.sh start llamacpp`. `./stack.sh status` shows what the file contributed.
 - **Run the server at the model's native 262k.** `CTX=262144 ./stack.sh start llamacpp`
   costs about 6 GiB more KV (q8_0: ~12.8 GiB instead of ~6.4 GiB) and doubles the room
   before compaction. Then set `contextWindow` to `262144` for the llama.cpp provider in

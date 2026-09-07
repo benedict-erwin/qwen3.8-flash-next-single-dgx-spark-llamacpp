@@ -16,6 +16,22 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
+# Personal defaults: plain KEY=value lines in ./stack.local (gitignored). A variable
+# already set in the environment wins, so `CTX=131072 ./stack.sh start` still
+# overrides the file. Anything serve.sh or llama-server reads from the environment
+# can go here (FORK, CTX, UBATCH, LLAMA_ARG_N_PARALLEL, API_KEY, HOST, ...).
+LOCAL_VARS=()
+if [ -f stack.local ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"; line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
+    [ -z "$line" ] && continue
+    k="${line%%=*}"; v="${line#*=}"
+    case "$k" in *[!A-Za-z0-9_]*|'') echo "!! stack.local: cannot parse '$line'" >&2; exit 2 ;; esac
+    v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
+    if [ -z "${!k+x}" ]; then export "$k=$v"; LOCAL_VARS+=("$k=$v"); fi
+  done < stack.local
+fi
+
 # Same HOST contract as serve.sh, so health checks probe whatever we bound to.
 HOST="${HOST:-127.0.0.1}"
 if [ "$HOST" = "tailscale" ]; then
@@ -164,6 +180,15 @@ Environment (start llamacpp; all optional, defaults are the measured profile)
   HOST=127.0.0.1         Bind address; 'tailscale' resolves the tailnet IP. API_KEY=<key>
                          turns on bearer auth; stack.sh presents it in its own health checks.
   LLAMA_ARG_N_PARALLEL=1 One slot: a strict one-request queue (see README).
+
+Personal defaults      Put KEY=value lines in ./stack.local (gitignored, never committed)
+                       and they apply to every start; an explicit environment variable
+                       still wins. 'status' lists what the file contributed. Example:
+                         FORK=unsloth-qsa
+                         CTX=262144
+                         UBATCH=512
+                         LLAMA_ARG_N_PARALLEL=1
+                         API_KEY=...        # chmod 600 stack.local if you keep the key here
 HELP
 }
 
@@ -233,6 +258,10 @@ status)
   if vl_up; then echo "vLLM      : running (port $VL_PORT)"; else echo "vLLM      : stopped"; fi
   echo "Ollama    : $(ollama_models) model(s) loaded"
   echo "memory    : $(avail) GiB available of 121"
-  echo "GPU       : $(gpu_line)" ;;
+  echo "GPU       : $(gpu_line)"
+  if [ -f stack.local ]; then
+    shown=(); for kv in "${LOCAL_VARS[@]}"; do case "$kv" in API_KEY=*) shown+=("API_KEY=<set>") ;; *) shown+=("$kv") ;; esac; done
+    echo "local     : ${shown[*]:-(all overridden by the environment)}"
+  fi ;;
 *) usage; exit 2 ;;
 esac

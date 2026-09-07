@@ -8,5 +8,8 @@ vllm-dgx/
 # Server and build logs; benchmark results (runs/*.jsonl) are kept.
 *.log
 
+# Personal stack.sh defaults (API key may live there).
+stack.local
+
 tmp/
 __pycache__/
