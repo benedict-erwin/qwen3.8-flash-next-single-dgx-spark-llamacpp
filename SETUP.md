@@ -50,6 +50,7 @@ This is the stack that won the benchmark: decode 36.7 tok/s, 88 GiB resident,
 ./stack.sh start llamacpp        # port 18080, OpenAI-compatible API
 ./stack.sh status
 ./stack.sh stop
+./stack.sh help                  # flags (e.g. --clock-cap, needs sudo) and env vars
 ```
 
 Every download script is re-runnable: each file is verified by exact byte size and

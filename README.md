@@ -124,7 +124,15 @@ First-time setup (downloads ~110 GB) is in [`SETUP.md`](SETUP.md). Once that is 
 ./stack.sh start llamacpp   # port 18080, OpenAI-compatible, ~45s
 ./stack.sh status
 ./stack.sh stop
+./stack.sh help             # every command, flag and env var, and what each needs
 ```
+
+`./stack.sh start llamacpp --clock-cap` additionally caps the GPU clock at 2200 MHz
+(`sudo nvidia-smi -lgc 0,2200`, so it asks for your password). Decode on GB10 is
+memory-bandwidth bound, so community measurements on vLLM put the cost at about 1%
+decode and 4% cold prefill for roughly a third less GPU-rail power and a 12 °C lower
+peak temperature; that has not been re-measured on this recipe yet [Unverified]. The
+cap does not survive a reboot; `./stack.sh stop --clock-reset` restores the defaults.
 
 `stack.sh` refuses to start when another backend is up, when Ollama holds a model,
 or when memory is short. Do not bypass it: the three of them share 121.7 GiB of
@@ -379,7 +387,7 @@ copy what you like, ignore the rest. [`pi/README.md`](pi/README.md) explains eac
 
 | Script | Purpose |
 |---|---|
-| `stack.sh` | start / stop / status for either backend, with a memory preflight |
+| `stack.sh` | start / stop / status / help for either backend, with a memory preflight; `--clock-cap` for a lower-power GPU clock |
 | `serve.sh` | launches llama-server directly (`--mtp`, `--nmax`, `--pmin`, `--vision`, `--ngram-mod`, `--mmap`, `CTX=`, `BUILD=`, `FORK=`, `UBATCH=`) |
 | `download-parts.sh` | main GGUF, 104 GiB |
 | `download-mtp.sh` | MTP draft head, 3.85 GiB |
