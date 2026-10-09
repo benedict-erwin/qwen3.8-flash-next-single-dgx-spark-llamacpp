@@ -40,3 +40,15 @@ memory    : 29 GiB available of 121
   VmRSS:	 2369664 kB
   VmSwap:	       0 kB
   [serve] build=fork config=mtp mmap=0 vision=1 nmax=3 pmin=0.50 ctx=131072 alias=qwen3.8-flash-next host=127.0.0.1:18080 auth=yes
+== hcf-ub1024-nsys  2026-10-09T23:45:05
+llama.cpp : running (pid 2110665, port 18080)
+memory    : 22 GiB available of 121
+  VmRSS:	   62000 kB
+  VmSwap:	       0 kB
+  [serve] build=fork config=mtp mmap=0 vision=1 nmax=3 pmin=0.50 ctx=262144 alias=qwen3.8-flash-next host=127.0.0.1:18080 auth=yes
+== hcf-ub1024  2026-10-09T23:46:49
+llama.cpp : running (pid 2117524, port 18080)
+memory    : 22 GiB available of 121
+  VmRSS:	 3458600 kB
+  VmSwap:	       0 kB
+  [serve] build=fork config=mtp mmap=0 vision=1 nmax=3 pmin=0.50 ctx=262144 alias=qwen3.8-flash-next host=127.0.0.1:18080 auth=yes

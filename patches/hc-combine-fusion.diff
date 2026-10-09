@@ -1,0 +1,297 @@
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index 2059ca9c8..d412df28a 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -29,6 +29,7 @@
+ #include "ggml-cuda/fattn-banded.cuh"
+ #include "ggml-cuda/fwht.cuh"
+ #include "ggml-cuda/getrows.cuh"
++#include "ggml-cuda/hc-combine.cuh"
+ #include "ggml-cuda/im2col.cuh"
+ #include "ggml-cuda/mmf.cuh"
+ #include "ggml-cuda/mmq.cuh"
+@@ -3534,6 +3535,66 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+ 
+     ggml_tensor * node = cgraph->nodes[i];
+ 
++    // hyper-connection combine (qwen4exp build_hc_combine):
++    //   REPEAT(blk) ; SCALE(inj) ; sigmoid ; SCALE ; RESHAPE ; MUL(repeat, w) ; ADD(res, mul)
++    // -> one kernel: dst = res + (s2*sigmoid(s1*inj + b1) + b2) * blk, broadcast over the streams.
++    if (node->op == GGML_OP_REPEAT) {
++        static const ggml_op ops[7] = { GGML_OP_REPEAT, GGML_OP_SCALE, GGML_OP_UNARY, GGML_OP_SCALE,
++                                        GGML_OP_RESHAPE, GGML_OP_MUL, GGML_OP_ADD };
++        const int out_idx = i + 6;
++        if (ggml_can_fuse_subgraph(cgraph, i, 7, ops, &out_idx, 1)) {
++            const ggml_tensor * repeat = cgraph->nodes[i];
++            const ggml_tensor * scale1 = cgraph->nodes[i + 1];
++            const ggml_tensor * sig    = cgraph->nodes[i + 2];
++            const ggml_tensor * scale2 = cgraph->nodes[i + 3];
++            const ggml_tensor * rw     = cgraph->nodes[i + 4];
++            const ggml_tensor * mul    = cgraph->nodes[i + 5];
++            ggml_tensor *       add    = cgraph->nodes[i + 6];
++
++            const ggml_tensor * blk = repeat->src[0];
++            const ggml_tensor * inj = scale1->src[0];
++            const ggml_tensor * res = add->src[0] == mul ? add->src[1] : add->src[0];
++
++            const bool wired = ggml_get_unary_op(sig) == GGML_UNARY_OP_SIGMOID &&
++                sig->src[0] == scale1 && scale2->src[0] == sig && rw->src[0] == scale2 &&
++                mul->src[0] == repeat && mul->src[1] == rw &&
++                (add->src[0] == mul || add->src[1] == mul) && res != mul;
++
++            const int64_t ne0 = repeat->ne[0];
++            const int64_t hc  = repeat->ne[1];
++            const int64_t nt  = repeat->ne[2] * repeat->ne[3];
++
++            const bool shapes = wired &&
++                res->type == GGML_TYPE_F32 && blk->type == GGML_TYPE_F32 && inj->type == GGML_TYPE_F32 &&
++                add->type == GGML_TYPE_F32 && mul->type == GGML_TYPE_F32 &&
++                ggml_is_contiguous(res) && ggml_is_contiguous(blk) && ggml_is_contiguous(inj) &&
++                ggml_is_contiguous(add) && ggml_are_same_shape(res, repeat) && ggml_are_same_shape(add, repeat) &&
++                blk->ne[0] == ne0 && ggml_nelements(blk) == ne0 * nt &&
++                inj->ne[0] == hc && ggml_nelements(inj) == hc * nt &&
++                rw->ne[0] == 1 && rw->ne[1] == hc && rw->ne[2] * rw->ne[3] == nt;
++
++            // the elided intermediates may be anywhere; the inputs must not partially overlap the
++            // output. res == dst (the in-place add) is fine: every element is read before it is written.
++            auto disjoint_or_same = [&](const ggml_tensor * src) {
++                const char * s0 = (const char *) src->data;
++                const char * s1 = s0 + ggml_nbytes(src);
++                const char * d0 = (const char *) add->data;
++                const char * d1 = d0 + ggml_nbytes(add);
++                return s1 <= d0 || d1 <= s0 || (src == res && s0 == d0);
++            };
++
++            if (shapes && disjoint_or_same(res) && disjoint_or_same(blk) && disjoint_or_same(inj)) {
++                float s1, b1, s2, b2;
++                memcpy(&s1, (const float *) scale1->op_params + 0, sizeof(float));
++                memcpy(&b1, (const float *) scale1->op_params + 1, sizeof(float));
++                memcpy(&s2, (const float *) scale2->op_params + 0, sizeof(float));
++                memcpy(&b2, (const float *) scale2->op_params + 1, sizeof(float));
++                ggml_cuda_op_hc_combine_fused(*cuda_ctx, res, blk, inj, s1, b1, s2, b2, add);
++                return 6;
++            }
++        }
++    }
++
+     if (node->op == GGML_OP_MUL) {
+         ggml_cuda_moe_weighted_reduction_match match;
+         if (ggml_cuda_match_moe_weighted_reduction(cgraph, i, match)) {
+diff --git a/ggml/src/ggml-cuda/hc-combine.cu b/ggml/src/ggml-cuda/hc-combine.cu
+new file mode 100644
+index 000000000..3b8daaa57
+--- /dev/null
++++ b/ggml/src/ggml-cuda/hc-combine.cu
+@@ -0,0 +1,81 @@
++#include "hc-combine.cuh"
++
++// One thread per float4 of the residual; e runs fastest, then the stream s, then the token t.
++// The gate is one scalar per (s, t), recomputed per thread: two FLOPs against 32 bytes of traffic.
++template <bool vec4>
++static __global__ void hc_combine_f32(const float * __restrict__ res,
++                                      const float * __restrict__ blk,
++                                      const float * __restrict__ inj,
++                                      float * __restrict__ dst,
++                                      const int64_t ne0, const int64_t hc, const int64_t n,
++                                      const float s1, const float b1, const float s2, const float b2) {
++    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
++    if (i >= n) {
++        return;
++    }
++
++    const int64_t idx = vec4 ? i * 4 : i;
++    const int64_t e   = idx % ne0;
++    const int64_t st  = idx / ne0;          // s + hc * t
++    const int64_t t   = st / hc;
++
++    // Same roundings as the unfused chain, so greedy output stays bit-identical:
++    // scale_f32 is `scale*x + bias` (contracted to an fma by nvcc), op_sigmoid is
++    // 1/(1+expf(-x)), then op_mul and op_add round separately -- no fma there.
++    const float g   = inj[st];
++    const float sig = 1.0f / (1.0f + expf(-fmaf(s1, g, b1)));
++    const float w   = fmaf(s2, sig, b2);
++
++    if constexpr (vec4) {
++        const float4 r = *(const float4 *) (res + idx);
++        const float4 b = *(const float4 *) (blk + t * ne0 + e);
++        float4 o;
++        o.x = __fadd_rn(r.x, __fmul_rn(b.x, w));
++        o.y = __fadd_rn(r.y, __fmul_rn(b.y, w));
++        o.z = __fadd_rn(r.z, __fmul_rn(b.z, w));
++        o.w = __fadd_rn(r.w, __fmul_rn(b.w, w));
++        *(float4 *) (dst + idx) = o;
++    } else {
++        dst[idx] = __fadd_rn(res[idx], __fmul_rn(blk[t * ne0 + e], w));
++    }
++}
++
++void ggml_cuda_op_hc_combine_fused(ggml_backend_cuda_context & ctx,
++                                   const ggml_tensor * res,
++                                   const ggml_tensor * blk,
++                                   const ggml_tensor * inj,
++                                   float s1, float b1, float s2, float b2,
++                                   ggml_tensor * dst) {
++    GGML_ASSERT(res->type == GGML_TYPE_F32 && blk->type == GGML_TYPE_F32 &&
++                inj->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32);
++    GGML_ASSERT(ggml_is_contiguous(res) && ggml_is_contiguous(blk) &&
++                ggml_is_contiguous(inj) && ggml_is_contiguous(dst));
++
++    const int64_t ne0 = res->ne[0];
++    const int64_t hc  = res->ne[1];
++    const int64_t nt  = res->ne[2] * res->ne[3];
++    GGML_ASSERT(ggml_nelements(blk) == ne0 * nt);
++    GGML_ASSERT(ggml_nelements(inj) == hc * nt);
++    GGML_ASSERT(ggml_nelements(dst) == ne0 * hc * nt);
++
++    const float * res_d = (const float *) res->data;
++    const float * blk_d = (const float *) blk->data;
++    const float * inj_d = (const float *) inj->data;
++    float *       dst_d = (float *) dst->data;
++
++    cudaStream_t stream = ctx.stream();
++    const int block_size = 256;
++
++    // float4 needs 16-byte alignment of every row start: ne0 % 4 == 0 covers res/dst/blk rows
++    const bool vec4 = ne0 % 4 == 0 && ((uintptr_t) res_d % 16 == 0) && ((uintptr_t) blk_d % 16 == 0) &&
++                      ((uintptr_t) dst_d % 16 == 0);
++    if (vec4) {
++        const int64_t n = ne0 * hc * nt / 4;
++        const int64_t grid = (n + block_size - 1) / block_size;
++        hc_combine_f32<true><<<grid, block_size, 0, stream>>>(res_d, blk_d, inj_d, dst_d, ne0, hc, n, s1, b1, s2, b2);
++    } else {
++        const int64_t n = ne0 * hc * nt;
++        const int64_t grid = (n + block_size - 1) / block_size;
++        hc_combine_f32<false><<<grid, block_size, 0, stream>>>(res_d, blk_d, inj_d, dst_d, ne0, hc, n, s1, b1, s2, b2);
++    }
++}
+diff --git a/ggml/src/ggml-cuda/hc-combine.cuh b/ggml/src/ggml-cuda/hc-combine.cuh
+new file mode 100644
+index 000000000..e50267a2b
+--- /dev/null
++++ b/ggml/src/ggml-cuda/hc-combine.cuh
+@@ -0,0 +1,17 @@
++#pragma once
++
++#include "common.cuh"
++
++// Fused hyper-connection combine, the tail of qwen4exp's build_hc_combine():
++//
++//   dst[e, s, t] = res[e, s, t] + (s2 * sigmoid(s1 * inj[s, t] + b1) + b2) * blk[e, t]
++//
++// res/dst: [ne0, hc, nt] f32 contiguous (dst may alias res), blk: ne0*nt f32 contiguous,
++// inj: hc*nt f32 contiguous. Replaces REPEAT, SCALE, UNARY(sigmoid), SCALE, MUL and ADD,
++// i.e. four passes over the residual become one read and one write of it.
++void ggml_cuda_op_hc_combine_fused(ggml_backend_cuda_context & ctx,
++                                   const ggml_tensor * res,
++                                   const ggml_tensor * blk,
++                                   const ggml_tensor * inj,
++                                   float s1, float b1, float s2, float b2,
++                                   ggml_tensor * dst);
+diff --git a/src/models/qwen4exp.cpp b/src/models/qwen4exp.cpp
+index 455f8a933..d867272f9 100644
+--- a/src/models/qwen4exp.cpp
++++ b/src/models/qwen4exp.cpp
+@@ -421,6 +421,9 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
+                 &inject, il);
+ 
+         ggml_build_forward_expand(gf, cur);
++        // expand the inject projection now, so build_hc_combine's ops end up contiguous in the
++        // graph: the CUDA backend fuses that chain into one kernel only when nothing sits between them
++        ggml_build_forward_expand(gf, inject);
+ 
+         if (hparams.is_recr(il)) {
+             cur = build_layer_attn_linear(inp->get_recr(), cur, il);
+@@ -449,6 +452,7 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
+                 model.layers[il].hc_ffn_up,
+                 model.layers[il].hc_ffn_inject,
+                 &inject, il);
++        ggml_build_forward_expand(gf, inject);
+ 
+         cur = build_layer_ffn(cur, il);
+         cb(cur, "ffn_out", il);
+@@ -560,6 +564,7 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
+             layer.hc_attn_norm, layer.hc_attn_down, layer.hc_attn_up, layer.hc_attn_inject,
+             &inject, il);
+     cb(cur, "mtp_hc_attn_pre", il);
++    ggml_build_forward_expand(gf, inject); // keeps the combine chain contiguous, see graph::graph
+ 
+     const int64_t n_embd_head = hparams.n_embd_head_v();
+     GGML_ASSERT(n_embd_head == hparams.n_embd_head_k());
+@@ -628,6 +633,7 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
+             layer.hc_ffn_norm, layer.hc_ffn_down, layer.hc_ffn_up, layer.hc_ffn_inject,
+             &inject, il);
+     cb(cur, "mtp_hc_ffn_pre", il);
++    ggml_build_forward_expand(gf, inject);
+ 
+     cur = build_layer_ffn(cur, il);
+     cb(cur, "mtp_ffn_out", il);
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index e04370a6c..cf0cf807f 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -3637,6 +3637,54 @@ struct test_rms_norm_back : public test_case {
+ };
+ 
+ // GGML_OP_RMS_NORM + GGML_OP_MUL + GGML_OP_ADD
++// qwen4exp hyper-connection combine: res + 2*sigmoid(inj/hc) (x) blk, as the model builds it
++// (REPEAT, SCALE, sigmoid, SCALE, RESHAPE, MUL, ADD). The CUDA backend fuses the chain.
++struct test_hc_combine : public test_case {
++    const int64_t ne0;
++    const int64_t hc;
++    const int64_t nt;
++
++    std::string op_desc(ggml_tensor * t) override {
++        GGML_UNUSED(t);
++        return "HC_COMBINE";
++    }
++
++    bool run_whole_graph() override { return true; }
++
++    std::string vars() override {
++        return VARS_TO_STR3(ne0, hc, nt);
++    }
++
++    test_hc_combine(int64_t ne0 = 2560, int64_t hc = 4, int64_t nt = 7)
++        : ne0(ne0), hc(hc), nt(nt) {}
++
++    ggml_tensor * build_graph(ggml_context * ctx) override {
++        ggml_tensor * res = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, ne0, hc, nt);
++        ggml_tensor * blk = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, ne0, nt);
++        ggml_tensor * inj = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hc, nt);
++        ggml_set_name(res, "res");
++        ggml_set_name(blk, "blk");
++        ggml_set_name(inj, "inj");
++
++        ggml_tensor * w = ggml_sigmoid(ctx, ggml_scale(ctx, inj, 1.0f / (float) hc));
++        w = ggml_scale(ctx, w, 2.0f);
++        w = ggml_reshape_3d(ctx, w, 1, hc, nt);
++
++        ggml_tensor * b = ggml_reshape_3d(ctx, blk, ne0, 1, nt);
++        b = ggml_repeat_4d(ctx, b, ne0, hc, nt, 1);
++
++        ggml_tensor * out = ggml_add(ctx, res, ggml_mul(ctx, b, w));
++        ggml_set_name(out, "out");
++        return out;
++    }
++
++    void initialize_tensors(ggml_context * ctx) override {
++        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
++            init_tensor_uniform(t, -4.f, 4.f);
++        }
++    }
++};
++
+ struct test_rms_norm_mul_add : public test_case {
+     const ggml_type type;
+     const std::array<int64_t, 4> ne;
+@@ -9452,6 +9500,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+     // in-place tests
+     test_cases.emplace_back(new test_rms_norm(GGML_TYPE_F32, {64, 5, 4, 3}, false, 1e-6f, true));
+ 
++    test_cases.emplace_back(new test_hc_combine(2560, 4, 7));   // model shape, float4 path
++    test_cases.emplace_back(new test_hc_combine(2560, 4, 512)); // one prefill ubatch
++    test_cases.emplace_back(new test_hc_combine(30, 3, 5));     // odd ne0: scalar path
++
+     for (float eps : { 0.0f, 1e-6f, 1e-4f, 1e-1f, 1.0f }) {
+         for (uint32_t n : { 64, 1025 }) {
+             test_cases.emplace_back(new test_rms_norm_mul_add(GGML_TYPE_F32, { n, 5, 4, 3 }, eps, false));

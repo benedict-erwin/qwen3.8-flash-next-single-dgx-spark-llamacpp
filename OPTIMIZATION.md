@@ -1266,3 +1266,47 @@ bandwidth would put prefill near 1,500–1,800 tok/s `[estimate]`.
 Decode is a different picture (section above: 50% dense GEMV, 28% expert GEMV, 207k tiny launches
 at 1.5–3 µs each inside CUDA graphs). Fusions 1–4 remove ~15 launches per layer there too, but at
 one token each pass is a few µs, so the decode gain is launch-floor only, a few percent.
+
+## 2026-10-09: Fusion #1 done — `hc_combine` as one kernel, +5% prefill, output bit-identical
+
+`patches/hc-combine-fusion.diff` (against the b10798 mix + QSA tree, built in a separate worktree
+as `forks/unsloth-hcf`). What it does:
+
+- `ggml/src/ggml-cuda/hc-combine.cu`: `dst = res + (s2·sigmoid(s1·inj + b1) + b2) · blk` over the
+  `[n_embd, hc, nt]` residual in one pass, float4 when `n_embd % 4 == 0`, scalar otherwise, safe
+  when the allocator makes the add in-place (`dst == res`). The arithmetic mirrors the unfused
+  kernels exactly (`fmaf` where `scale_f32` contracts, separate `__fmul_rn`/`__fadd_rn` where
+  `op_mul`/`op_add` round twice): the first version used `s2 / (1+e)` instead of `s2 · (1/(1+e))`
+  and that one ulp was enough to change greedy output within 128 tokens.
+- `ggml-cuda.cu`: the pattern `REPEAT, SCALE, UNARY(sigmoid), SCALE, RESHAPE, MUL, ADD` is matched
+  in `ggml_cuda_try_fuse`, starting at `REPEAT` because view ops are skipped before fusion is
+  tried. Legality via `ggml_can_fuse_subgraph`; the memory-overlap check is done locally because
+  the shared helper rejects the in-place add, which is exactly the common case here.
+- `src/models/qwen4exp.cpp`: four `ggml_build_forward_expand(gf, inject)` so the inject GEMM is
+  emitted before the combine chain instead of in the middle of it (without this the chain is not
+  contiguous and nothing fuses). The last layer keeps the unfused path: there a `get_rows` on
+  `inject` sits inside the chain.
+- `tests/test-backend-ops.cpp`: `test_hc_combine`, whole-graph, CUDA fused vs CPU unfused, for the
+  model shape, one 512-token ubatch and an odd `n_embd` (scalar path). All three pass.
+
+Measured (`runs/bench-stream2.jsonl` labels `qsa-ub1024` vs `hcf-ub1024`, server-side cold prefill
+in `runs/profile-2026-10-09/timings.jsonl`, same session as the sweep above):
+
+| | `qsa` `-ub 1024` | `hcf` `-ub 1024` | Δ |
+|---|---|---|---|
+| Prefill tok/s, prompts 0/1/2 | 713 / 707 / 715 | **749 / 742 / 753** | **+5.1%** |
+| TTFT, prompts 1 / 2 | 17.29 / 14.55 s | 16.15 / 13.82 s | −6.6% / −5.0% |
+| Decode tok/s, prompts 1 / 2 | 37.1 / 42.8 | 37.0 / 43.5 | noise |
+| Used memory | 96 GiB | 95 GiB | — |
+
+nsys on the fused build (`runs/profile-2026-10-09/hcf-ub1024-prefill_cuda_gpu_kern_sum.csv`):
+`hc_combine_f32` 1,152 launches, 332 µs each at 1024 tokens — 94 MB moved per call, i.e. ~283 GB/s,
+the memory ceiling — and `k_bin_bcast<op_repeat>` down from 2,277 launches to 36 (the last layer).
+The survey predicted 3.5% at `-ub 512`; at `-ub 1024` the combine was a larger share, hence 5%.
+
+**Exactness:** with `MTP=0`, the first 128 greedy tokens after a fresh start are byte-identical
+between `qsa` and `hcf` (sha `ddf8ce52ec380fd1` on prompt 1). A side finding that needs its own
+look: **the second identical request on the same server (MTP off, `cache_prompt: false`) does not
+reproduce the first** (`ca9e096def263113`), on both builds. The 2026-09-06 conclusion that MTP is
+the cause of greedy non-determinism is therefore incomplete; this is the cold-vs-warm question
+(Plan C) and is still open.
