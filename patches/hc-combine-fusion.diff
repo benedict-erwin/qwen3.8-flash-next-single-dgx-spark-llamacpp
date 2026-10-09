@@ -1,17 +1,31 @@
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 2059ca9c8..41603a892 100644
+index 2059ca9c8..f5a0737a0 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
-@@ -29,6 +29,8 @@
+@@ -29,6 +29,9 @@
  #include "ggml-cuda/fattn-banded.cuh"
  #include "ggml-cuda/fwht.cuh"
  #include "ggml-cuda/getrows.cuh"
 +#include "ggml-cuda/hc-combine.cuh"
 +#include "ggml-cuda/hc-mix.cuh"
++#include "ggml-cuda/mm-skinny.cuh"
  #include "ggml-cuda/im2col.cuh"
  #include "ggml-cuda/mmf.cuh"
  #include "ggml-cuda/mmq.cuh"
-@@ -3534,6 +3536,139 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+@@ -1919,6 +1922,12 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
+         ggml_cuda_mul_mat_vec_f(ctx, src0, src1, nullptr, dst);
+         return;
+     }
++    // a handful of f32 output rows over a long reduction and many columns (qwen4exp's hc inject):
++    // a GEMM with M = 4 runs far below the memory bound in cuBLAS, one block per column does not
++    if (!f32_pedantic && ggml_cuda_should_use_mm_skinny(src0, src1, dst)) {
++        ggml_cuda_mul_mat_skinny(ctx, src0, src1, dst);
++        return;
++    }
+     // A transposed vector can still use MMVQ (i.e. ne01 == 1)
+     if (ne01 == 1 && ne11 > MMVF_MAX_BATCH_SIZE && ne2 == 1 && ne3 == 1
+             && src0->type == GGML_TYPE_F32
+@@ -3534,6 +3543,139 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
  
      ggml_tensor * node = cgraph->nodes[i];
  
@@ -378,6 +392,138 @@ index 000000000..f22348164
 +                                    int64_t ne0, int64_t hc, int64_t nt,
 +                                    float s, float b,
 +                                    ggml_tensor * dst);
+diff --git a/ggml/src/ggml-cuda/mm-skinny.cu b/ggml/src/ggml-cuda/mm-skinny.cu
+new file mode 100644
+index 000000000..2966a576c
+--- /dev/null
++++ b/ggml/src/ggml-cuda/mm-skinny.cu
+@@ -0,0 +1,108 @@
++#include "mm-skinny.cuh"
++
++// One block per column n of src1; the threads stride over k, each keeping M partial sums,
++// then the block reduces them. src1's column is read exactly once, coalesced; src0 (K x M
++// floats, a few hundred KB) is re-read per block from L2.
++template <int M, bool vec4>
++static __global__ void __launch_bounds__(256) mm_skinny_f32(const float * __restrict__ w,   // [K, M]
++                                                             const float * __restrict__ x,   // [K, N]
++                                                             float * __restrict__ dst,       // [M, N]
++                                                             const int64_t K) {
++    const int64_t n   = blockIdx.x;
++    const int     tid = threadIdx.x;
++    const float * xn  = x + n * K;
++
++    float acc[M];
++#pragma unroll
++    for (int m = 0; m < M; ++m) {
++        acc[m] = 0.0f;
++    }
++
++    if constexpr (vec4) {
++        for (int64_t k = tid * 4; k < K; k += 256 * 4) {
++            const float4 xv = *(const float4 *) (xn + k);
++#pragma unroll
++            for (int m = 0; m < M; ++m) {
++                const float4 wv = *(const float4 *) (w + m * K + k);
++                acc[m] = fmaf(xv.x, wv.x, acc[m]);
++                acc[m] = fmaf(xv.y, wv.y, acc[m]);
++                acc[m] = fmaf(xv.z, wv.z, acc[m]);
++                acc[m] = fmaf(xv.w, wv.w, acc[m]);
++            }
++        }
++    } else {
++        for (int64_t k = tid; k < K; k += 256) {
++            const float xv = xn[k];
++#pragma unroll
++            for (int m = 0; m < M; ++m) {
++                acc[m] = fmaf(xv, w[m * K + k], acc[m]);
++            }
++        }
++    }
++
++    // warp reduce, then one warp sums the 8 warp results
++    __shared__ float red[8][M];
++#pragma unroll
++    for (int m = 0; m < M; ++m) {
++        float v = acc[m];
++#pragma unroll
++        for (int off = 16; off > 0; off >>= 1) {
++            v += __shfl_xor_sync(0xffffffff, v, off);
++        }
++        if ((tid & 31) == 0) {
++            red[tid >> 5][m] = v;
++        }
++    }
++    __syncthreads();
++    if (tid < M) {
++        float v = 0.0f;
++#pragma unroll
++        for (int wi = 0; wi < 8; ++wi) {
++            v += red[wi][tid];
++        }
++        dst[n * M + tid] = v;
++    }
++}
++
++bool ggml_cuda_should_use_mm_skinny(const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * dst) {
++    return src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32 &&
++           ggml_is_contiguous(src0) && ggml_is_contiguous(src1) && ggml_is_contiguous(dst) &&
++           src0->ne[1] >= 1 && src0->ne[1] <= MM_SKINNY_MAX_M &&
++           src0->ne[2] == 1 && src0->ne[3] == 1 && src1->ne[2] == 1 && src1->ne[3] == 1 &&
++           src0->ne[0] >= 1024 && src1->ne[1] >= 1;
++}
++
++template <int M>
++static void launch_mm_skinny(const float * w, const float * x, float * dst, int64_t K, int64_t N, cudaStream_t stream) {
++    const bool vec4 = K % 4 == 0 && ((uintptr_t) w % 16 == 0) && ((uintptr_t) x % 16 == 0);
++    if (vec4) {
++        mm_skinny_f32<M, true><<<N, 256, 0, stream>>>(w, x, dst, K);
++    } else {
++        mm_skinny_f32<M, false><<<N, 256, 0, stream>>>(w, x, dst, K);
++    }
++}
++
++void ggml_cuda_mul_mat_skinny(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
++    GGML_ASSERT(ggml_cuda_should_use_mm_skinny(src0, src1, dst));
++    const int64_t K = src0->ne[0];
++    const int64_t M = src0->ne[1];
++    const int64_t N = src1->ne[1];
++    GGML_ASSERT(dst->ne[0] == M && dst->ne[1] == N && src1->ne[0] == K);
++
++    const float * w = (const float *) src0->data;
++    const float * x = (const float *) src1->data;
++    float *       d = (float *) dst->data;
++    cudaStream_t  stream = ctx.stream();
++
++    switch (M) {
++        case 1: launch_mm_skinny<1>(w, x, d, K, N, stream); break;
++        case 2: launch_mm_skinny<2>(w, x, d, K, N, stream); break;
++        case 3: launch_mm_skinny<3>(w, x, d, K, N, stream); break;
++        case 4: launch_mm_skinny<4>(w, x, d, K, N, stream); break;
++        case 5: launch_mm_skinny<5>(w, x, d, K, N, stream); break;
++        case 6: launch_mm_skinny<6>(w, x, d, K, N, stream); break;
++        case 7: launch_mm_skinny<7>(w, x, d, K, N, stream); break;
++        case 8: launch_mm_skinny<8>(w, x, d, K, N, stream); break;
++        default: GGML_ABORT("mm_skinny: unsupported M");
++    }
++}
+diff --git a/ggml/src/ggml-cuda/mm-skinny.cuh b/ggml/src/ggml-cuda/mm-skinny.cuh
+new file mode 100644
+index 000000000..95d6eb93b
+--- /dev/null
++++ b/ggml/src/ggml-cuda/mm-skinny.cuh
+@@ -0,0 +1,12 @@
++#pragma once
++
++#include "common.cuh"
++
++// f32 x f32 matmul with very few output rows (src0->ne[1] <= MM_SKINNY_MAX_M) and a long
++// reduction: dst[m, n] = sum_k src0[k, m] * src1[k, n]. cuBLAS treats this as a GEMM with M = 4
++// and lands far from the memory bound; one block per column of src1 reading it once is
++// what the shape needs (qwen4exp's hyper-connection inject projections, hc_dim -> hc).
++#define MM_SKINNY_MAX_M 8
++
++bool ggml_cuda_should_use_mm_skinny(const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * dst);
++void ggml_cuda_mul_mat_skinny(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst);
 diff --git a/src/models/qwen4exp.cpp b/src/models/qwen4exp.cpp
 index 455f8a933..ba551b06c 100644
 --- a/src/models/qwen4exp.cpp
@@ -449,7 +595,7 @@ index 455f8a933..ba551b06c 100644
  
      key = grouped_norm(key, model.layers[il].ple_norm_key);
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
-index e04370a6c..9db692c0e 100644
+index e04370a6c..8a48fb6cc 100644
 --- a/tests/test-backend-ops.cpp
 +++ b/tests/test-backend-ops.cpp
 @@ -3637,6 +3637,101 @@ struct test_rms_norm_back : public test_case {
@@ -569,3 +715,16 @@ index e04370a6c..9db692c0e 100644
      for (float eps : { 0.0f, 1e-6f, 1e-4f, 1e-1f, 1.0f }) {
          for (uint32_t n : { 64, 1025 }) {
              test_cases.emplace_back(new test_rms_norm_mul_add(GGML_TYPE_F32, { n, 5, 4, 3 }, eps, false));
+@@ -9743,6 +9846,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F16, GGML_TYPE_F32, 1056, 1, 67,  {1,  1}, {4, 1}, {0, 2, 1, 3}));
+     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, 16, 32, 32, { 1,  1}, {1, 1}, {0, 1, 2, 3}, 64, 3));
+     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, 64, 77, 77, {12,1}, {1,1}));
++    // skinny-M f32 path (qwen4exp hc inject: K = 10240, M = 4, N = tokens) and its edges
++    for (int64_t m : { 1, 2, 4, 5, 8 }) {
++        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, m, 7, 10240, {1, 1}, {1, 1}));
++        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, m, 512, 2562, {1, 1}, {1, 1}));  // K % 4 != 0
++    }
++    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, 4, 1024, 10240, {1, 1}, {1, 1}));
+     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, 32, 4, 96, {3, 2}, {1, 1}, {0, 1, 2, 3}, 0, 1, true));
+ 
+     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 576, 512, 576, {1,1}, {1,1}));

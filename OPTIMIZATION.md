@@ -1408,3 +1408,32 @@ cause is MTP" was looking at the same op (verification batches are `nrows <= 4` 
 more visible, it was never the cause. Every greedy comparison in this document made above ~4k
 context without this switch carries that noise; the GSM8K/HumanEval+ numbers (1–2k prompts) do
 not, the 30k-prefix GSM8K (`2026-09-06`) does.
+
+## 2026-10-10: Candidates #4–#6 measured — the cheap elementwise wins are used up
+
+Same session, same prompts, `-ub 1024` (`runs/bench-stream2.jsonl` labels `hcf4-ub1024`,
+`hcf5-ub1024`; nsys `runs/profile-2026-10-09/hcf4-ub1024-prefill_cuda_gpu_kern_sum.csv`).
+
+- **#4, standalone first step — a skinny-M f32 matmul** (`ggml/src/ggml-cuda/mm-skinny.cu`,
+  taken for f32×f32 with ≤ 8 output rows and K ≥ 1024): the inject projection
+  (`hc_dim → 4`, 10,240-long reduction over up to 1,024 tokens) was a cuBLAS GEMM with M = 4
+  at ~205 GB/s (203 µs per 1024-token call) plus a `splitKreduce`; one block per column reading
+  it once runs at ~240 GB/s (175 µs). 1,056 calls per 10.9k prefill → ~30 ms of 13.2 s, **+0.2%**.
+  Kept (tested against CPU for M = 1…8, K % 4 ≠ 0, N up to 1024), but the number says the GEMM
+  was never the problem; the second read of `xn` is. Folding the four dot products into the
+  grouped-norm kernel, so `xn` is read once, is the real #4 (~1.4% `[estimate]`) and needs a
+  custom norm kernel — not done.
+- **#6, transpose before concat — a regression, reverted.** `ggml_cont(ggml_transpose(x))` +
+  contiguous `concat` costs 336 + 320 µs per call against 536 µs for the single
+  `concat_non_cont`: ggml's transpose copy runs at ~60 GB/s here, worse than the strided concat
+  it was meant to replace. A tiled transpose+concat kernel would be the way (~1% `[estimate]`); not
+  done.
+- **#5, folding the shared-expert add into the MoE reduction: not attempted.** With #4/#6 measured
+  at these sizes, its ≈0.3% is not worth a pattern on top of the existing
+  `moe_weighted_reduction` fusion.
+
+End state of the optional build (`hcf5-ub1024`): prefill **791 / 796 / 801 tok/s**, TTFT
+15.2 / 13.2 s, decode 40.4 / 44.6 — the same as after #3 within noise. The hyper-connection
+scaffolding went from 18% of prefill to ~8% (one norm, one tail, one combine, one skinny GEMM per
+mix/combine); what remains in prefill is the expert GEMM (now ~65% of GPU time) and the per-layer
+GDN/attention work. Next is the MMQ `MUL_MAT_ID` kernel, not another elementwise fusion.
