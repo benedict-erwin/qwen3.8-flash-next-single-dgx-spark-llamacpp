@@ -12,6 +12,13 @@
 # extended to MTP verification batches; measured on GB10 it cuts the verification step 12-13%
 # at 32k-64k context and does nothing below 24k (see OPTIMIZATION.md 2026-09-06). Optional.
 #
+#   HC_FUSE=1 QSA_GATHER=1 ./build-fork.sh   # also applies patches/hc-combine-fusion.diff:
+#   FORK=unsloth-hcf UBATCH=1024 ./stack.sh start llamacpp
+# The third patch fuses the hyper-connection combine (REPEAT, SCALE, sigmoid, SCALE, MUL, ADD over
+# the residual) into one CUDA kernel and reorders the graph so the chain is contiguous; +5% prefill
+# at -ub 1024, output bit-identical (OPTIMIZATION.md 2026-10-09). Written against the QSA tree,
+# so it needs QSA_GATHER=1. Optional.
+#
 # How: the fork's release tag is a manifest, not a tree. CI assembles upstream <tag> + the
 # PR commits pinned in scripts/unsloth/pr-set.json (merged in order). patches/compose-mix.py
 # reproduces that composition on a full upstream clone; then the patch is applied and the
@@ -24,11 +31,14 @@ cd "$(dirname "$0")"
 TAG="${TAG:-b10798-mix-659e406}"        # fork release tag: its pr-set.json defines the mix (b10798: +6% decode vs b10715, measured)
 UPSTREAM_TAG="${TAG%%-*}"               # b10715
 QSA_GATHER="${QSA_GATHER:-0}"
-OUT="forks/${FORK_OUT:-$([ "$QSA_GATHER" = 1 ] && echo unsloth-qsa || echo unsloth-mixfix)}"
+HC_FUSE="${HC_FUSE:-0}"
+[ "$HC_FUSE" = 1 ] && [ "$QSA_GATHER" != 1 ] && { echo "HC_FUSE=1 needs QSA_GATHER=1 (the patch is written against that tree)" >&2; exit 2; }
+OUT="forks/${FORK_OUT:-$([ "$HC_FUSE" = 1 ] && echo unsloth-hcf || { [ "$QSA_GATHER" = 1 ] && echo unsloth-qsa || echo unsloth-mixfix; })}"
 MANIFEST="forks/src-manifest-$TAG"
 SRC="forks/src-mix-$UPSTREAM_TAG"
 PATCH=patches/mmq-ids-tail-padding.patch
 PATCH_QSA=patches/unsloth-pr165-qsa-gather.diff
+PATCH_HCF=patches/hc-combine-fusion.diff
 
 command -v nvcc >/dev/null || { echo "nvcc not found: install the CUDA toolkit first (13.0 was used here)" >&2; exit 1; }
 [ -d "$MANIFEST/.git" ] || git clone -q --depth 1 --branch "$TAG" https://github.com/unslothai/llama.cpp "$MANIFEST"
@@ -48,12 +58,19 @@ command -v nvcc >/dev/null || { echo "nvcc not found: install the CUDA toolkit f
   elif git apply --reverse --check "../../$PATCH_QSA" 2>/dev/null; then
     git apply --reverse "../../$PATCH_QSA"; echo "[patch] removed $PATCH_QSA (QSA_GATHER=0)"
   fi
+  if [ "$HC_FUSE" = 1 ]; then
+    if git apply --check "../../$PATCH_HCF" 2>/dev/null; then git apply "../../$PATCH_HCF"; echo "[patch] applied $PATCH_HCF"
+    elif git apply --reverse --check "../../$PATCH_HCF" 2>/dev/null; then echo "[patch] already applied $PATCH_HCF"
+    else echo "!! $PATCH_HCF does not apply; it was written against the QSA tree of mix b10798-mix-659e406" >&2; exit 1; fi
+  elif git apply --reverse --check "../../$PATCH_HCF" 2>/dev/null; then
+    git apply --reverse "../../$PATCH_HCF"; echo "[patch] removed $PATCH_HCF (HC_FUSE=0)"
+  fi
   cmake -B build -S . -DGGML_CUDA=ON -DGGML_CUDA_CUB_3DOT2=ON \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=native -DLLAMA_CURL=OFF
   cmake --build build -j"${JOBS:-8}" --target llama-server )
 
 mkdir -p "$OUT"
 for f in "$SRC"/build/bin/*; do ln -sf "$PWD/$f" "$OUT/$(basename "$f")"; done
-echo "llama.cpp version: mix $TAG composed locally ($(git -C "$SRC" rev-parse --short HEAD)) + $PATCH$([ "$QSA_GATHER" = 1 ] && echo " + $PATCH_QSA")" > "$OUT/BUILD_INFO.txt"
+echo "llama.cpp version: mix $TAG composed locally ($(git -C "$SRC" rev-parse --short HEAD)) + $PATCH$([ "$QSA_GATHER" = 1 ] && echo " + $PATCH_QSA")$([ "$HC_FUSE" = 1 ] && echo " + $PATCH_HCF")" > "$OUT/BUILD_INFO.txt"
 LD_LIBRARY_PATH="$PWD/$OUT" "$OUT/llama-server" --version 2>&1 | head -1
 echo "FORK READY -> $OUT   (use: FORK=$(basename "$OUT") UBATCH=512 ./stack.sh start llamacpp)"

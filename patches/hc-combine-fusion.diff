@@ -1,23 +1,97 @@
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 2059ca9c8..d412df28a 100644
+index 2059ca9c8..41603a892 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
-@@ -29,6 +29,7 @@
+@@ -29,6 +29,8 @@
  #include "ggml-cuda/fattn-banded.cuh"
  #include "ggml-cuda/fwht.cuh"
  #include "ggml-cuda/getrows.cuh"
 +#include "ggml-cuda/hc-combine.cuh"
++#include "ggml-cuda/hc-mix.cuh"
  #include "ggml-cuda/im2col.cuh"
  #include "ggml-cuda/mmf.cuh"
  #include "ggml-cuda/mmq.cuh"
-@@ -3534,6 +3535,66 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+@@ -3534,6 +3536,139 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
  
      ggml_tensor * node = cgraph->nodes[i];
  
++    // GGML_CUDA_HC_FUSE_DISABLE bitmask for A/B runs: 1 = mix tail, 2 = combine
++    static const int hc_fuse_disable = getenv("GGML_CUDA_HC_FUSE_DISABLE") ? std::atoi(getenv("GGML_CUDA_HC_FUSE_DISABLE")) : 0;
++
++    // hyper-connection mix tail (qwen4exp build_hc_mix):
++    //   sigmoid(g) ; MUL(xn, sig) ; RESHAPE [ne0, hc, nt] ; VIEW stream 0 ; CONT ;
++    //   (VIEW stream c ; ADD) x (hc-1) ; SCALE 1/hc
++    // -> one kernel: dst[e,t] = s * sum_c xn[e,c,t] * sigmoid(g[e,c,t]) + b, the gated tensor never written.
++    if (!(hc_fuse_disable & 1) && node->op == GGML_OP_UNARY && ggml_get_unary_op(node) == GGML_UNARY_OP_SIGMOID &&
++            i + 2 < cgraph->n_nodes && cgraph->nodes[i + 2]->op == GGML_OP_RESHAPE) {
++        const int64_t hc = cgraph->nodes[i + 2]->ne[1];
++        if (hc >= 2 && hc <= 16) {
++            ggml_op ops[5 + 2 * 15 + 1];
++            ops[0] = GGML_OP_UNARY; ops[1] = GGML_OP_MUL; ops[2] = GGML_OP_RESHAPE;
++            ops[3] = GGML_OP_VIEW;  ops[4] = GGML_OP_CONT;
++            int n_ops = 5;
++            for (int64_t c = 1; c < hc; ++c) {
++                ops[n_ops++] = GGML_OP_VIEW;
++                ops[n_ops++] = GGML_OP_ADD;
++            }
++            ops[n_ops++] = GGML_OP_SCALE;
++            const int out_idx = i + n_ops - 1;
++
++            if (ggml_can_fuse_subgraph(cgraph, i, n_ops, ops, &out_idx, 1) &&
++                    ggml_cuda_check_fusion_memory_ranges(cgraph, i, n_ops, &out_idx, 1)) {
++                const ggml_tensor * sig     = cgraph->nodes[i];
++                const ggml_tensor * mul     = cgraph->nodes[i + 1];
++                const ggml_tensor * reshape = cgraph->nodes[i + 2];
++                const ggml_tensor * view0   = cgraph->nodes[i + 3];
++                const ggml_tensor * cont    = cgraph->nodes[i + 4];
++                ggml_tensor *       scale   = cgraph->nodes[out_idx];
++
++                const ggml_tensor * g  = sig->src[0];
++                const ggml_tensor * xn = mul->src[0] == sig ? mul->src[1] : mul->src[0];
++
++                const int64_t ne0 = reshape->ne[0];
++                const int64_t nt  = reshape->ne[2] * reshape->ne[3];
++                const size_t  nb1 = (size_t) ne0 * hc * sizeof(float);   // row stride of the stream views
++
++                auto stream_view = [&](const ggml_tensor * v, int64_t c) {
++                    return v->src[0] == reshape && v->ne[0] == ne0 && v->ne[1] == nt && v->ne[2] == 1 && v->ne[3] == 1 &&
++                           v->nb[1] == nb1 && v->view_offs == (size_t) c * ne0 * sizeof(float);
++                };
++
++                bool wired = (mul->src[0] == sig || mul->src[1] == sig) && xn != sig &&
++                    reshape->src[0] == mul && reshape->ne[1] == hc &&
++                    stream_view(view0, 0) && cont->src[0] == view0;
++                const ggml_tensor * prev = cont;
++                for (int64_t c = 1; wired && c < hc; ++c) {
++                    const ggml_tensor * v   = cgraph->nodes[i + 5 + 2 * (c - 1)];
++                    const ggml_tensor * add = cgraph->nodes[i + 6 + 2 * (c - 1)];
++                    wired = stream_view(v, c) && add->src[0] == prev && add->src[1] == v;
++                    prev = add;
++                }
++                wired = wired && scale->src[0] == prev;
++
++                const bool shapes = wired &&
++                    g->type == GGML_TYPE_F32 && xn->type == GGML_TYPE_F32 && mul->type == GGML_TYPE_F32 &&
++                    scale->type == GGML_TYPE_F32 &&
++                    ggml_is_contiguous(g) && ggml_is_contiguous(xn) && ggml_is_contiguous(scale) &&
++                    ggml_are_same_shape(g, xn) && ggml_are_same_shape(mul, xn) &&
++                    ggml_nelements(xn) == ne0 * hc * nt && ggml_nelements(scale) == ne0 * nt;
++
++                if (shapes) {
++                    float s, b;
++                    memcpy(&s, (const float *) scale->op_params + 0, sizeof(float));
++                    memcpy(&b, (const float *) scale->op_params + 1, sizeof(float));
++                    ggml_cuda_op_hc_mix_tail_fused(*cuda_ctx, xn, g, ne0, hc, nt, s, b, scale);
++                    return n_ops - 1;
++                }
++            }
++        }
++    }
++
 +    // hyper-connection combine (qwen4exp build_hc_combine):
 +    //   REPEAT(blk) ; SCALE(inj) ; sigmoid ; SCALE ; RESHAPE ; MUL(repeat, w) ; ADD(res, mul)
 +    // -> one kernel: dst = res + (s2*sigmoid(s1*inj + b1) + b2) * blk, broadcast over the streams.
-+    if (node->op == GGML_OP_REPEAT) {
++    if (!(hc_fuse_disable & 2) && node->op == GGML_OP_REPEAT) {
 +        static const ggml_op ops[7] = { GGML_OP_REPEAT, GGML_OP_SCALE, GGML_OP_UNARY, GGML_OP_SCALE,
 +                                        GGML_OP_RESHAPE, GGML_OP_MUL, GGML_OP_ADD };
 +        const int out_idx = i + 6;
@@ -187,11 +261,145 @@ index 000000000..e50267a2b
 +                                   const ggml_tensor * inj,
 +                                   float s1, float b1, float s2, float b2,
 +                                   ggml_tensor * dst);
+diff --git a/ggml/src/ggml-cuda/hc-mix.cu b/ggml/src/ggml-cuda/hc-mix.cu
+new file mode 100644
+index 000000000..8a5eed5cc
+--- /dev/null
++++ b/ggml/src/ggml-cuda/hc-mix.cu
+@@ -0,0 +1,86 @@
++#include "hc-mix.cuh"
++
++static __device__ __forceinline__ float hc_sigmoid(float x) {
++    return 1.0f / (1.0f + expf(-x));   // op_sigmoid in unary.cu
++}
++
++// One thread per float4 of the output row; e runs fastest, then the token t.
++template <bool vec4>
++static __global__ void hc_mix_tail_f32(const float * __restrict__ xn,
++                                       const float * __restrict__ g,
++                                       float * __restrict__ dst,
++                                       const int64_t ne0, const int64_t hc, const int64_t n,
++                                       const float s, const float b) {
++    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
++    if (i >= n) {
++        return;
++    }
++
++    const int64_t idx = vec4 ? i * 4 : i;
++    const int64_t e   = idx % ne0;
++    const int64_t t   = idx / ne0;
++    const int64_t row = t * hc * ne0 + e;   // stream 0 of token t
++
++    if constexpr (vec4) {
++        float4 acc;
++        {
++            const float4 x = *(const float4 *) (xn + row);
++            const float4 l = *(const float4 *) (g  + row);
++            acc.x = __fmul_rn(x.x, hc_sigmoid(l.x));
++            acc.y = __fmul_rn(x.y, hc_sigmoid(l.y));
++            acc.z = __fmul_rn(x.z, hc_sigmoid(l.z));
++            acc.w = __fmul_rn(x.w, hc_sigmoid(l.w));
++        }
++        for (int64_t c = 1; c < hc; ++c) {
++            const float4 x = *(const float4 *) (xn + row + c * ne0);
++            const float4 l = *(const float4 *) (g  + row + c * ne0);
++            acc.x = __fadd_rn(acc.x, __fmul_rn(x.x, hc_sigmoid(l.x)));
++            acc.y = __fadd_rn(acc.y, __fmul_rn(x.y, hc_sigmoid(l.y)));
++            acc.z = __fadd_rn(acc.z, __fmul_rn(x.z, hc_sigmoid(l.z)));
++            acc.w = __fadd_rn(acc.w, __fmul_rn(x.w, hc_sigmoid(l.w)));
++        }
++        float4 o;
++        o.x = fmaf(s, acc.x, b);
++        o.y = fmaf(s, acc.y, b);
++        o.z = fmaf(s, acc.z, b);
++        o.w = fmaf(s, acc.w, b);
++        *(float4 *) (dst + idx) = o;
++    } else {
++        float acc = __fmul_rn(xn[row], hc_sigmoid(g[row]));
++        for (int64_t c = 1; c < hc; ++c) {
++            acc = __fadd_rn(acc, __fmul_rn(xn[row + c * ne0], hc_sigmoid(g[row + c * ne0])));
++        }
++        dst[idx] = fmaf(s, acc, b);
++    }
++}
++
++void ggml_cuda_op_hc_mix_tail_fused(ggml_backend_cuda_context & ctx,
++                                    const ggml_tensor * xn,
++                                    const ggml_tensor * g,
++                                    int64_t ne0, int64_t hc, int64_t nt,
++                                    float s, float b,
++                                    ggml_tensor * dst) {
++    GGML_ASSERT(xn->type == GGML_TYPE_F32 && g->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32);
++    GGML_ASSERT(ggml_is_contiguous(xn) && ggml_is_contiguous(g) && ggml_is_contiguous(dst));
++    GGML_ASSERT(ggml_nelements(xn) == ne0 * hc * nt && ggml_nelements(g) == ne0 * hc * nt);
++    GGML_ASSERT(ggml_nelements(dst) == ne0 * nt);
++
++    const float * xn_d  = (const float *) xn->data;
++    const float * g_d   = (const float *) g->data;
++    float *       dst_d = (float *) dst->data;
++
++    cudaStream_t stream = ctx.stream();
++    const int block_size = 256;
++
++    const bool vec4 = ne0 % 4 == 0 && ((uintptr_t) xn_d % 16 == 0) && ((uintptr_t) g_d % 16 == 0) &&
++                      ((uintptr_t) dst_d % 16 == 0);
++    if (vec4) {
++        const int64_t n = ne0 * nt / 4;
++        const int64_t grid = (n + block_size - 1) / block_size;
++        hc_mix_tail_f32<true><<<grid, block_size, 0, stream>>>(xn_d, g_d, dst_d, ne0, hc, n, s, b);
++    } else {
++        const int64_t n = ne0 * nt;
++        const int64_t grid = (n + block_size - 1) / block_size;
++        hc_mix_tail_f32<false><<<grid, block_size, 0, stream>>>(xn_d, g_d, dst_d, ne0, hc, n, s, b);
++    }
++}
+diff --git a/ggml/src/ggml-cuda/hc-mix.cuh b/ggml/src/ggml-cuda/hc-mix.cuh
+new file mode 100644
+index 000000000..f22348164
+--- /dev/null
++++ b/ggml/src/ggml-cuda/hc-mix.cuh
+@@ -0,0 +1,19 @@
++#pragma once
++
++#include "common.cuh"
++
++// Fused tail of qwen4exp's build_hc_mix(): the sigmoid gate, the gating multiply, the sum of
++// the hc streams and the 1/hc scale in one pass.
++//
++//   dst[e, t] = s * ( sum_{c=0}^{hc-1} xn[e, c, t] * sigmoid(g[e, c, t]) ) + b
++//
++// xn, g: [ne0*hc, nt] f32 contiguous (xn is the normed residual, g the gate logits),
++// dst: [ne0, nt] f32 contiguous. Replaces UNARY(sigmoid)+MUL, CONT, hc-1 ADDs and SCALE,
++// and never materialises the [ne0, hc, nt] gated tensor. Roundings match the unfused chain:
++// one product per element, the adds in stream order, the scale as fma like scale_f32.
++void ggml_cuda_op_hc_mix_tail_fused(ggml_backend_cuda_context & ctx,
++                                    const ggml_tensor * xn,
++                                    const ggml_tensor * g,
++                                    int64_t ne0, int64_t hc, int64_t nt,
++                                    float s, float b,
++                                    ggml_tensor * dst);
 diff --git a/src/models/qwen4exp.cpp b/src/models/qwen4exp.cpp
-index 455f8a933..d867272f9 100644
+index 455f8a933..ba551b06c 100644
 --- a/src/models/qwen4exp.cpp
 +++ b/src/models/qwen4exp.cpp
-@@ -421,6 +421,9 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
+@@ -308,9 +308,15 @@ ggml_tensor * llama_model_qwen4exp::graph::build_hc_mix(
+ 
+     // grouped RMSNorm: reduce over one stream, then scale all streams with the [hc_dim] gamma
+     // the converter folded each gamma to (1 + w)
++    // the gamma is applied as [n_embd, hc] on the 3D norm output rather than after the reshape:
++    // same arithmetic, but now the CUDA backend's rms_norm+mul fusion matches (one pass, not two)
++    // the gamma view is expanded first: otherwise the DFS puts it between RMS_NORM and MUL and
++    // the backend's two-node pattern no longer sees them adjacent
++    ggml_tensor * gamma = ggml_reshape_2d(ctx0, w_norm, n_embd, hc);
++    ggml_build_forward_expand(gf, gamma);
+     ggml_tensor * xn = ggml_rms_norm(ctx0, x, hparams.f_norm_rms_eps);
++    xn = ggml_mul(ctx0, xn, gamma);
+     xn = ggml_reshape_2d(ctx0, xn, hc_dim, nt);
+-    xn = ggml_mul(ctx0, xn, w_norm);
+     cb(xn, "hc_norm", il);
+ 
+     ggml_tensor * lo = build_lora_mm(w_down, xn);
+@@ -421,6 +427,9 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
                  &inject, il);
  
          ggml_build_forward_expand(gf, cur);
@@ -201,7 +409,7 @@ index 455f8a933..d867272f9 100644
  
          if (hparams.is_recr(il)) {
              cur = build_layer_attn_linear(inp->get_recr(), cur, il);
-@@ -449,6 +452,7 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
+@@ -449,6 +458,7 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
                  model.layers[il].hc_ffn_up,
                  model.layers[il].hc_ffn_inject,
                  &inject, il);
@@ -209,7 +417,7 @@ index 455f8a933..d867272f9 100644
  
          cur = build_layer_ffn(cur, il);
          cb(cur, "ffn_out", il);
-@@ -560,6 +564,7 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
+@@ -560,6 +570,7 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
              layer.hc_attn_norm, layer.hc_attn_down, layer.hc_attn_up, layer.hc_attn_inject,
              &inject, il);
      cb(cur, "mtp_hc_attn_pre", il);
@@ -217,7 +425,7 @@ index 455f8a933..d867272f9 100644
  
      const int64_t n_embd_head = hparams.n_embd_head_v();
      GGML_ASSERT(n_embd_head == hparams.n_embd_head_k());
-@@ -628,6 +633,7 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
+@@ -628,6 +639,7 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
              layer.hc_ffn_norm, layer.hc_ffn_down, layer.hc_ffn_up, layer.hc_ffn_inject,
              &inject, il);
      cb(cur, "mtp_hc_ffn_pre", il);
@@ -225,11 +433,26 @@ index 455f8a933..d867272f9 100644
  
      cur = build_layer_ffn(cur, il);
      cb(cur, "mtp_ffn_out", il);
+@@ -1588,10 +1600,11 @@ ggml_tensor * llama_model_qwen4exp::graph::build_ple(
+     // both norms group over one hc stream, with a weight over the whole hc*n_embd layout
+     auto grouped_norm = [&](ggml_tensor * x, ggml_tensor * w) {
+         ggml_tensor * t = ggml_reshape_3d(ctx0, x, n_embd, hc, n_tokens);
++        // gamma as [n_embd, hc] on the 3D tensor, expanded first, so rms_norm+mul fuses (see build_hc_mix)
++        ggml_tensor * gamma = ggml_reshape_2d(ctx0, w, n_embd, hc);
++        ggml_build_forward_expand(gf, gamma);
+         t = ggml_rms_norm(ctx0, t, hparams.f_norm_rms_eps);
+-        t = ggml_reshape_2d(ctx0, t, hc_dim, n_tokens);
+-        t = ggml_mul(ctx0, t, w);
+-        return ggml_reshape_3d(ctx0, t, n_embd, hc, n_tokens);
++        return ggml_mul(ctx0, t, gamma);
+     };
+ 
+     key = grouped_norm(key, model.layers[il].ple_norm_key);
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
-index e04370a6c..cf0cf807f 100644
+index e04370a6c..9db692c0e 100644
 --- a/tests/test-backend-ops.cpp
 +++ b/tests/test-backend-ops.cpp
-@@ -3637,6 +3637,54 @@ struct test_rms_norm_back : public test_case {
+@@ -3637,6 +3637,101 @@ struct test_rms_norm_back : public test_case {
  };
  
  // GGML_OP_RMS_NORM + GGML_OP_MUL + GGML_OP_ADD
@@ -281,16 +504,67 @@ index e04370a6c..cf0cf807f 100644
 +    }
 +};
 +
++// qwen4exp hyper-connection mix tail: (xn * sigmoid(g)) summed over the hc streams, / hc,
++// as the model builds it (UNARY, MUL, RESHAPE, VIEW, CONT, (VIEW, ADD)*, SCALE). CUDA fuses it.
++struct test_hc_mix_tail : public test_case {
++    const int64_t ne0;
++    const int64_t hc;
++    const int64_t nt;
++
++    std::string op_desc(ggml_tensor * t) override {
++        GGML_UNUSED(t);
++        return "HC_MIX_TAIL";
++    }
++
++    bool run_whole_graph() override { return true; }
++
++    std::string vars() override {
++        return VARS_TO_STR3(ne0, hc, nt);
++    }
++
++    test_hc_mix_tail(int64_t ne0 = 2560, int64_t hc = 4, int64_t nt = 7)
++        : ne0(ne0), hc(hc), nt(nt) {}
++
++    ggml_tensor * build_graph(ggml_context * ctx) override {
++        ggml_tensor * xn = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, ne0 * hc, nt);
++        ggml_tensor * g  = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, ne0 * hc, nt);
++        ggml_set_name(xn, "xn");
++        ggml_set_name(g, "g");
++
++        ggml_tensor * gated = ggml_mul(ctx, xn, ggml_sigmoid(ctx, g));
++        gated = ggml_reshape_3d(ctx, gated, ne0, hc, nt);
++
++        const size_t nb1 = ggml_row_size(gated->type, ne0) * hc;
++        ggml_tensor * mixed = ggml_cont(ctx, ggml_view_2d(ctx, gated, ne0, nt, nb1, 0));
++        for (int64_t c = 1; c < hc; ++c) {
++            mixed = ggml_add(ctx, mixed, ggml_view_2d(ctx, gated, ne0, nt, nb1, ggml_row_size(gated->type, ne0) * c));
++        }
++        ggml_tensor * out = ggml_scale(ctx, mixed, 1.0f / (float) hc);
++        ggml_set_name(out, "out");
++        return out;
++    }
++
++    void initialize_tensors(ggml_context * ctx) override {
++        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
++            init_tensor_uniform(t, -4.f, 4.f);
++        }
++    }
++};
++
  struct test_rms_norm_mul_add : public test_case {
      const ggml_type type;
      const std::array<int64_t, 4> ne;
-@@ -9452,6 +9500,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -9452,6 +9547,14 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
      // in-place tests
      test_cases.emplace_back(new test_rms_norm(GGML_TYPE_F32, {64, 5, 4, 3}, false, 1e-6f, true));
  
 +    test_cases.emplace_back(new test_hc_combine(2560, 4, 7));   // model shape, float4 path
 +    test_cases.emplace_back(new test_hc_combine(2560, 4, 512)); // one prefill ubatch
 +    test_cases.emplace_back(new test_hc_combine(30, 3, 5));     // odd ne0: scalar path
++    test_cases.emplace_back(new test_hc_mix_tail(2560, 4, 7));
++    test_cases.emplace_back(new test_hc_mix_tail(2560, 4, 512));
++    test_cases.emplace_back(new test_hc_mix_tail(30, 3, 5));
++    test_cases.emplace_back(new test_hc_mix_tail(64, 2, 3));
 +
      for (float eps : { 0.0f, 1e-6f, 1e-4f, 1e-1f, 1.0f }) {
          for (uint32_t n : { 64, 1025 }) {

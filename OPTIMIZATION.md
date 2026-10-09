@@ -1267,7 +1267,7 @@ Decode is a different picture (section above: 50% dense GEMV, 28% expert GEMV, 2
 at 1.5–3 µs each inside CUDA graphs). Fusions 1–4 remove ~15 launches per layer there too, but at
 one token each pass is a few µs, so the decode gain is launch-floor only, a few percent.
 
-## 2026-10-09: Fusion #1 done — `hc_combine` as one kernel, +5% prefill, output bit-identical
+## 2026-10-09: Fusion #1 done — `hc_combine` as one kernel, +5% prefill
 
 `patches/hc-combine-fusion.diff` (against the b10798 mix + QSA tree, built in a separate worktree
 as `forks/unsloth-hcf`). What it does:
@@ -1304,9 +1304,57 @@ nsys on the fused build (`runs/profile-2026-10-09/hcf-ub1024-prefill_cuda_gpu_ke
 the memory ceiling — and `k_bin_bcast<op_repeat>` down from 2,277 launches to 36 (the last layer).
 The survey predicted 3.5% at `-ub 512`; at `-ub 1024` the combine was a larger share, hence 5%.
 
-**Exactness:** with `MTP=0`, the first 128 greedy tokens after a fresh start are byte-identical
-between `qsa` and `hcf` (sha `ddf8ce52ec380fd1` on prompt 1). A side finding that needs its own
-look: **the second identical request on the same server (MTP off, `cache_prompt: false`) does not
-reproduce the first** (`ca9e096def263113`), on both builds. The 2026-09-06 conclusion that MTP is
-the cause of greedy non-determinism is therefore incomplete; this is the cold-vs-warm question
-(Plan C) and is still open.
+**Exactness:** `test-backend-ops` (CUDA fused vs CPU unfused) is the gate, and the kernel mirrors
+the unfused roundings by construction. The first attempt at a stronger check — comparing the sha of
+128 greedy tokens (`MTP=0`) after a cold start between `qsa` and `hcf` — turned out to be
+**worthless, and it is worth recording why**: the baseline itself does not reproduce. Three cold
+starts of one build gave three different outputs on the same prompt (`ddf8ce52ec380fd1`,
+`6c72ae1f3c1a3aba`, `3854e5d9568a0ed0`), and a second identical request on a running server
+differs from the first. The 2026-09-06 conclusion that MTP is *the* cause of greedy
+non-determinism is wrong: with MTP off the server is still non-deterministic, run to run. The
+outcomes repeat (the same sha shows up across builds), which points at a small number of
+tie-breaks rather than accumulated noise — the model's own QSA top-k selection through an unstable
+segmented sort is the obvious suspect `[Spekulasi]`. This is Plan C and still open; until it is
+settled, no greedy-sha comparison between builds means anything.
+
+## 2026-10-10: Fusions #2 and #3 done — the hyper-connection scaffolding is now three kernels, +12% prefill over `qsa`
+
+Same patch file (`patches/hc-combine-fusion.diff`, now the whole hyper-connection set; worktree
+branch `hcf` at `b19280c24`), same build flag (`HC_FUSE=1 QSA_GATHER=1 ./build-fork.sh`).
+
+- **#2 `hc_mix` tail** (`ggml/src/ggml-cuda/hc-mix.cu`): `UNARY(sigmoid), MUL, RESHAPE, VIEW, CONT,
+  (VIEW, ADD)×(hc−1), SCALE` → one kernel computing `s·Σ_c xn[e,c,t]·sigmoid(g[e,c,t]) + b`
+  straight from the normed residual and the gate logits. The `[n_embd, hc, nt]` gated tensor is
+  never written. Roundings as the unfused chain (one product per element, adds in stream order,
+  fma for the scale). The pattern is matched from the sigmoid node, ahead of ggml's own
+  `UNARY+MUL` fusion which would otherwise claim the first two nodes. The shared overlap helper is
+  used here because the output layout differs from the inputs.
+- **#3 grouped norm**: no new kernel. `build_hc_mix` now applies the gamma as a `[n_embd, hc]`
+  view on the 3D norm output (same arithmetic), and expands that view before the norm — without
+  the expansion the DFS places the view node between `RMS_NORM` and `MUL` and ggml's two-node
+  pattern never matches (seen in the first attempt: `k_bin_bcast<op_mul>` stayed at 2,305
+  launches). With it, 2,305 → 1,104.
+- `GGML_CUDA_HC_FUSE_DISABLE=1|2|3` switches the mix-tail and combine patterns off for A/B runs.
+- `test_hc_mix_tail` added to `test-backend-ops` (4 shapes); all `HC_*` tests pass with fusion on
+  and, via the env switch, off.
+
+Measured (`runs/bench-stream2.jsonl` labels `hcf2-ub1024` = #1+#2, `hcf3-ub1024` = #1+#2+#3;
+nsys counts in `runs/profile-2026-10-09/hcf{2,3}-ub1024-prefill_cuda_gpu_kern_sum.csv`):
+
+| | `qsa` | `hcf` #1 | #1+#2 | **#1+#2+#3** |
+|---|---|---|---|---|
+| Prefill tok/s, prompts 0/1/2 (`-ub 1024`) | 713 / 707 / 715 | 749 / 742 / 753 | 778 / 775 / 783 | **798 / 792 / 804** |
+| vs `qsa` | — | +5.1% | +9.3% | **+12.0%** |
+| TTFT prompts 1 / 2 | 17.29 / 14.55 s | 16.15 / 13.82 | 15.88 / 13.26 | **15.20 / 13.00** |
+| Decode tok/s (2 runs) | 37.1 / 42.8 | 37.0 / 43.5 | 37.0 / 42.2 | 40.4 / 41.8 |
+| GPU kernel time, one 10.9k prefill under nsys | — | 14.69 s | 13.53 s | 13.21 s |
+
+Per 1024-token call: `hc_mix_tail_f32` 358 µs (1,130 launches), `hc_combine_f32` 330 µs (1,152);
+`k_bin_bcast<op_add>` 5,715 → 2,325 launches, `unary_gated<sigmoid>` 1,753 → 623, `scale_f32`
+2,559 → 1,429. The survey's estimate for #1–#3 was ≈8% at `-ub 512`; measured 12% at `-ub 1024`,
+where the elementwise share is larger. Against the shipped profile (`qsa -ub 512`, 600–607 tok/s)
+the optional build now prefills **+32%** (`FORK=unsloth-hcf UBATCH=1024`).
+
+What is left of the hyper-connection cost: the two inject GEMMs (cutlass f32, ~150 µs each at 512
+tokens, candidate #4) and the grouped norm itself, now one fused launch per mix. The next
+candidates by size are the MoE epilogue (#5) and the `concat_non_cont` of qkvz (#6).

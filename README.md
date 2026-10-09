@@ -116,6 +116,21 @@ Not the default because it needs a build, the patch is pinned to the b10798 mix 
 maintained only here, and it only helps deep into a session; the measurements and the
 port's caveats are in `OPTIMIZATION.md`.
 
+A second optional patch on top of that tree fuses the model's hyper-connection
+scaffolding — the per-layer mix and combine over the `[n_embd, 4, n_tokens]` residual,
+which an nsys profile showed to be 18% of prefill time spread over unfused elementwise
+kernels — into three CUDA kernels (`patches/hc-combine-fusion.diff`, 2026-10-09/10, the
+profile and the per-kernel accounting are in `OPTIMIZATION.md`). Measured at `-ub 1024`:
+prefill 707–715 → 792–804 tok/s (+12%), TTFT −12%, decode unchanged; the same session
+found `-ub 1024` itself worth +18% prefill for +3 GiB now that the crash is patched, so
+against the shipped `-ub 512` profile the pair is +32%. The kernels mirror the unfused
+roundings and are checked against the CPU backend by `test-backend-ops`:
+
+```bash
+HC_FUSE=1 QSA_GATHER=1 ./build-fork.sh           # ~15 min
+FORK=unsloth-hcf UBATCH=1024 ./stack.sh start llamacpp
+```
+
 ## Quick start
 
 First-time setup (downloads ~110 GB) is in [`SETUP.md`](SETUP.md). Once that is done:
@@ -399,7 +414,7 @@ copy what you like, ignore the rest. [`pi/README.md`](pi/README.md) explains eac
 | `download-mtp.sh` | MTP draft head, 3.85 GiB |
 | `download-mmproj.sh` | vision projector, 0.85 GiB — enables images |
 | `download-fork.sh` | Unsloth llama.cpp prebuilt — required for MTP (`TAG=` for another release) |
-| `build-fork.sh` | rebuild that prebuilt's exact composition from source with the one-line MMQ crash fix; `QSA_GATHER=1` adds the long-context gather patch (`patches/`) |
+| `build-fork.sh` | rebuild that prebuilt's exact composition from source with the one-line MMQ crash fix; `QSA_GATHER=1` adds the long-context gather patch, `HC_FUSE=1` the hyper-connection kernel fusions (`patches/`) |
 | `bench.sh` | short-prompt decode/prefill benchmark against llama.cpp; superseded by `bench-stream.py` |
 | `bench-code.sh` | coding-shaped benchmark against llama.cpp |
 | `bench-stream.py` | streaming benchmark; the only one valid for comparing across backends |
