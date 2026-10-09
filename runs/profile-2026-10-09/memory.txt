@@ -1,0 +1,42 @@
+== next-ub512-direct-nsys  2026-10-09T20:29:25
+llama.cpp : running (pid 1276890, port 18080)
+memory    : 24 GiB available of 121
+  VmRSS:	   59396 kB
+  VmSwap:	       0 kB
+  [serve] build=fork config=mtp mmap=0 vision=1 nmax=3 pmin=0.50 ctx=262144 alias=qwen3.8-flash-next host=127.0.0.1:18080 auth=yes
+== next-ub512-direct  2026-10-09T20:32:41
+llama.cpp : running (pid 1299619, port 18080)
+memory    : 25 GiB available of 121
+  VmRSS:	 2718052 kB
+  VmSwap:	       0 kB
+  [serve] build=fork config=mtp mmap=0 vision=1 nmax=3 pmin=0.50 ctx=262144 alias=qwen3.8-flash-next host=127.0.0.1:18080 auth=yes
+== next-ub1024-direct  2026-10-09T20:36:15
+llama.cpp : running (pid 1316770, port 18080)
+memory    : 22 GiB available of 121
+  VmRSS:	 3452784 kB
+  VmSwap:	       0 kB
+  [serve] build=fork config=mtp mmap=0 vision=1 nmax=3 pmin=0.50 ctx=262144 alias=qwen3.8-flash-next host=127.0.0.1:18080 auth=yes
+== qsa-ub512  2026-10-09T20:39:35
+llama.cpp : running (pid 1358669, port 18080)
+memory    : 25 GiB available of 121
+  VmRSS:	 2719760 kB
+  VmSwap:	       0 kB
+  [serve] build=fork config=mtp mmap=0 vision=1 nmax=3 pmin=0.50 ctx=262144 alias=qwen3.8-flash-next host=127.0.0.1:18080 auth=yes
+== next-ub512-lazyoff  2026-10-09T20:43:13
+llama.cpp : running (pid 1372106, port 18080)
+memory    : 25 GiB available of 121
+  VmRSS:	 2720100 kB
+  VmSwap:	       0 kB
+  [serve] build=fork config=mtp mmap=0 vision=1 nmax=3 pmin=0.50 ctx=262144 alias=qwen3.8-flash-next host=127.0.0.1:18080 auth=yes
+== qsa-ub1024  2026-10-09T20:46:53
+llama.cpp : running (pid 1385697, port 18080)
+memory    : 22 GiB available of 121
+  VmRSS:	 3454736 kB
+  VmSwap:	       0 kB
+  [serve] build=fork config=mtp mmap=0 vision=1 nmax=3 pmin=0.50 ctx=262144 alias=qwen3.8-flash-next host=127.0.0.1:18080 auth=yes
+== qsa-ub512-ctx131k  2026-10-09T20:49:59
+llama.cpp : running (pid 1397125, port 18080)
+memory    : 29 GiB available of 121
+  VmRSS:	 2369664 kB
+  VmSwap:	       0 kB
+  [serve] build=fork config=mtp mmap=0 vision=1 nmax=3 pmin=0.50 ctx=131072 alias=qwen3.8-flash-next host=127.0.0.1:18080 auth=yes

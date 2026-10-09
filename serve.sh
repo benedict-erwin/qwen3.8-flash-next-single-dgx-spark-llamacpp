@@ -101,7 +101,10 @@ if (( VISION )); then
 fi
 
 echo "[serve] build=$BUILD config=$LABEL mmap=$USE_MMAP vision=$VISION nmax=$NMAX pmin=$PMIN ctx=$CTX alias=$ALIAS host=$HOST:$PORT auth=$([ -n "$API_KEY" ] && echo yes || echo no)"
-exec "$BIN" \
+# LAUNCHER wraps the binary for profiling, e.g. LAUNCHER="nsys launch -t cuda",
+# so a profiled run still goes through stack.sh and its memory preflight.
+# shellcheck disable=SC2086
+exec ${LAUNCHER:-} "$BIN" \
   -m "$MODEL" \
   -ngl 999 \
   -ot "per_layer_token_embd.weight=CPU" \

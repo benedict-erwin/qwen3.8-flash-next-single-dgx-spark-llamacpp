@@ -1108,3 +1108,94 @@ prebuilt remains the default for a first installation. For coding sessions that 
 (marked: 27 tok/s) `[estimate]` +10% at the upper end, +25% if it reaches 100k. The other road still
 waits for upstream to enable sparse FA for this model's head dim (the TODO in `qwen4exp.cpp`).
 `bench-longctx.py` and `bench-accuracy-longctx.py` remain for re-measuring.
+
+## 2026-10-09: Where the time goes — nsys profile, `-ub` sweep, PLE direct reads measured
+
+Goal: before writing any kernel, find out which kernels prefill and decode actually spend their
+time in, whether the three patches assembled on 2026-09-07 (`unsloth-next`: llama.cpp #28136 PLE
+direct reads, #27705 output reorder, Unsloth #182 spec sub-batch) are worth anything, and whether
+`-ub 1024` is safe now that the MUL_MAT_ID crash is patched. Everything in one session, same three
+prompts, server started through `stack.sh` each time (ctx 262144, MTP n-max 3 p-min 0.50, vision on,
+KV q8_0). Data: `runs/profile-2026-10-09/` (nsys kernel/API summaries, server-side timings,
+memory notes) and `runs/bench-stream2.jsonl` (labels `next-ub512-direct`, `next-ub1024-direct`,
+`next-ub512-lazyoff`, `qsa-ub512`, `qsa-ub1024`).
+
+### Kernel profile (Nsight Systems 2025.3.2, `-t cuda --cuda-graph-trace=node`, `unsloth-next`, `-ub 512`)
+
+`serve.sh` gained a `LAUNCHER=` hook so `nsys launch` wraps the binary without bypassing the
+`stack.sh` preflight. One capture per phase: a cold 10,892-token prefill with `n_predict=1`, then a
+47-token prompt decoding 256 tokens with MTP active. Capture overhead: prefill 562 vs 585–592 tok/s
+in the server log without capture, decode 35.3 vs 36.1 tok/s.
+
+**Prefill — 19.4 s server-side, GPU kernels busy 17.6 s (91%)**
+(`next-ub512-direct-prefill_cuda_gpu_kern_sum.csv`, grouped by kernel family):
+
+| Family | GPU time | Launches |
+|---|---|---|
+| `mul_mat_q` — quantized GEMM, MoE experts and dense projections | **61.0%** | 14,190 |
+| elementwise: `k_bin_bcast` add/mul, sigmoid/silu, `rms_norm`, concat, scale | **18.7%** | 53,239 |
+| `gated_delta_net` / ssm conv | 6.8% | 1,656 |
+| MoE routing: cub segmented sort, `moe_weighted_reduction`, get_rows | 3.0% | 6,324 |
+| `quantize_mmq_q8_1` (activations to int8 for MMQ) | 2.8% | 16,193 |
+| f16/f32 GEMM (`mul_mat_f`, cutlass) | 2.4% | 5,268 |
+| flash-attn | 2.0% | 598 |
+| everything else | 3.3% | |
+
+**Decode — 7.23 s for 256 tokens, 197 drafts / 169 accepted (0.86), 360 CUDA-graph launches
+(≈87 target forwards + 3 draft-head forwards each → ≈83 ms per target step); GPU kernels busy
+6.10 s (84%)** (`next-ub512-direct-decode_cuda_gpu_kern_sum.csv`):
+
+| Family | GPU time | Launches |
+|---|---|---|
+| `mul_mat_vec_q` — dense per-token GEMV (attn/ssm/head: the 63%-of-bytes tensors) | **50.4%** | 48,466 |
+| `mul_mat_vec_q_moe` — expert GEMV | **27.6%** | 7,392 |
+| elementwise (1.5–3 µs each, inside graphs) | 7.4% | 207,404 |
+| `quantize_q8_1` | 2.8% | 61,231 |
+| f16/f32 GEMM, `gated_delta_net`, MoE routing, `mul_mat_q` (verification batches) | 2.0–2.5% each | |
+| flash-attn | 0.4% | 2,319 |
+
+Reading: prefill is one kernel family (MMQ, 61%) plus a long tail of unfused elementwise ops
+(19%, 53k launches in 19 s). Decode is the bandwidth picture from section 1: half the GPU time is
+the dense per-token GEMV, a quarter the experts; attention is irrelevant at this length. Per
+target step the roofline bytes are ≈8–10 GiB (dense 3.86 + head 0.63 + up to 40 distinct experts
+for 4 verified tokens + the draft head) → ≥30–38 ms at 273 GB/s against 83 ms measured, so decode
+runs at roughly 40–45% of the ceiling per step `[estimate]`. The kernel plan therefore has two
+prefill targets (MMQ for `MUL_MAT_ID`, fusing the elementwise tail) and one decode target (the dense
+GEMV pipeline); nothing else is worth touching first.
+
+### `-ub` sweep and the three patches (same session, server timings for prefill, `n_predict=1`, cache off)
+
+| Build / flags | Used GiB | Prefill tok/s (prompts 0/1/2) | Decode tok/s (prompts 1 / 2, median) |
+|---|---|---|---|
+| `unsloth-next` `-ub 512` + PLE on-direct | 93 | 585–592 (log) | 33.6 / 38.6 → **36.1** |
+| `unsloth-next` `-ub 1024` + PLE on-direct | 96 | 698 / 700 / 716 | 33.3 / 40.1 → 36.7 |
+| `unsloth-next` `-ub 512`, lazy mode default | 93 | 609 / 603 / 610 | 40.8 / 43.7 → **42.3** |
+| `unsloth-qsa` `-ub 512` (shipped optional build) | 93 | 607 / 601 / 607 | 38.7 / 43.8 → 41.3 |
+| `unsloth-qsa` `-ub 1024` | 96 | **713 / 707 / 715** | 37.1 / 42.8 → 40.0 |
+| `unsloth-qsa` `-ub 512`, `CTX=131072` | 90 | 558 (one probe) | — |
+
+Findings:
+
+1. **PLE direct reads (#28136, `--lazy-mode on-direct`) are a regression here: −13–15% decode,
+   −3–7% prefill, and 0 GiB saved.** `pread()` still goes through the page cache (`Cached` stays at
+   ~22 GiB either way), so nothing is freed, while the reader spawns up to 2×cores = 40
+   `std::thread`s per gather and uses one worker for gathers under 32 rows — i.e. every decode
+   token. The same shape as TensorFold's own "SSD threads" ablation (one reader thread: prefill 4×
+   slower). Not recommended; the memory question it was meant to answer is settled below.
+2. **`-ub 1024` is safe and worth +17–18% prefill** (600 → 710 tok/s on both builds, three
+   prompts, no crash) for +3 GiB. Decode moves −3% on two runs, within noise. Diminishing: the
+   Mia/TensorFold ablation found 1024 → 2048 worth only 6% more, and 2048 would put us near
+   99 GiB used, so it was not tried. New personal default: `UBATCH=1024` in `stack.local`.
+3. **The 94-vs-88 GiB puzzle from 2026-09-08 is the context length, not a patch**: 93 GiB at
+   `CTX=262144` vs 90 at `131072` on the same build (KV q8_0 doubles), the README's 88 being
+   `-ub 256` without vision. The three patches change memory by nothing.
+4. **#27705 + #182 give nothing measurable at 11k tokens**: `unsloth-next` without on-direct
+   equals `unsloth-qsa` (42.3 vs 41.3 decode, 603–610 vs 601–607 prefill). The `NEXT=1` build is
+   not worth shipping.
+5. **Harness defect #4:** prompt 0 (`common/speculative.cpp`) now ends with EOS as the greedy
+   first token on every build and both context lengths tested, so `bench-stream.py` dropped runs 1
+   and 4 in every sweep (medians above are over 2 runs). The source file is unchanged since
+   2026-08-31 and the same prompt produced 256 tokens on 2026-09-06 (`mmqfix-cub-ub256`), so
+   something in the b10798 mix changes the first greedy token `[Spekulasi]`. Cold-prefill numbers
+   are unaffected (they do not depend on what the model says). To fix: a different prompt source
+   or a stop guard in `bench-stream.py`.

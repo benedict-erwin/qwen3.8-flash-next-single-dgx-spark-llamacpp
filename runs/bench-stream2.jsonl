@@ -55,3 +55,13 @@
 {"label": "b10798fix-nographs-ub256", "run": 2, "src": "llama.cpp/src/llama-kv-cache.cpp", "ttft_s": 27.75, "total_s": 35.09, "chunks": 256, "tokens": 256, "chars": 1051, "finish": "length", "decode_tps": 34.75}
 {"label": "b10798fix-nographs-ub256", "run": 3, "src": "llama.cpp/common/arg.cpp", "ttft_s": 23.62, "total_s": 29.97, "chunks": 256, "tokens": 256, "chars": 957, "finish": "length", "decode_tps": 40.18}
 {"label": "b10798fix-ub256", "run": 2, "src": "llama.cpp/src/llama-kv-cache.cpp", "ttft_s": 27.73, "total_s": 34.84, "chunks": 256, "tokens": 256, "chars": 1049, "finish": "length", "decode_tps": 35.88}
+{"label": "next-ub512-direct", "run": 2, "src": "llama.cpp/src/llama-kv-cache.cpp", "ttft_s": 20.43, "total_s": 28.01, "chunks": 256, "tokens": 256, "chars": 1023, "finish": "length", "decode_tps": 33.61}
+{"label": "next-ub512-direct", "run": 3, "src": "llama.cpp/common/arg.cpp", "ttft_s": 17.38, "total_s": 24.0, "chunks": 256, "tokens": 256, "chars": 980, "finish": "length", "decode_tps": 38.55}
+{"label": "next-ub1024-direct", "run": 2, "src": "llama.cpp/src/llama-kv-cache.cpp", "ttft_s": 17.32, "total_s": 24.98, "chunks": 256, "tokens": 256, "chars": 1045, "finish": "length", "decode_tps": 33.28}
+{"label": "next-ub1024-direct", "run": 3, "src": "llama.cpp/common/arg.cpp", "ttft_s": 14.89, "total_s": 21.25, "chunks": 256, "tokens": 256, "chars": 939, "finish": "length", "decode_tps": 40.12}
+{"label": "qsa-ub512", "run": 2, "src": "llama.cpp/src/llama-kv-cache.cpp", "ttft_s": 20.18, "total_s": 26.77, "chunks": 256, "tokens": 256, "chars": 974, "finish": "length", "decode_tps": 38.7}
+{"label": "qsa-ub512", "run": 3, "src": "llama.cpp/common/arg.cpp", "ttft_s": 17.11, "total_s": 22.93, "chunks": 256, "tokens": 256, "chars": 923, "finish": "length", "decode_tps": 43.81}
+{"label": "next-ub512-lazyoff", "run": 2, "src": "llama.cpp/src/llama-kv-cache.cpp", "ttft_s": 19.99, "total_s": 26.24, "chunks": 256, "tokens": 256, "chars": 924, "finish": "length", "decode_tps": 40.8}
+{"label": "next-ub512-lazyoff", "run": 3, "src": "llama.cpp/common/arg.cpp", "ttft_s": 17.01, "total_s": 22.84, "chunks": 256, "tokens": 256, "chars": 914, "finish": "length", "decode_tps": 43.73}
+{"label": "qsa-ub1024", "run": 2, "src": "llama.cpp/src/llama-kv-cache.cpp", "ttft_s": 17.29, "total_s": 24.16, "chunks": 256, "tokens": 256, "chars": 959, "finish": "length", "decode_tps": 37.11}
+{"label": "qsa-ub1024", "run": 3, "src": "llama.cpp/common/arg.cpp", "ttft_s": 14.55, "total_s": 20.51, "chunks": 256, "tokens": 256, "chars": 953, "finish": "length", "decode_tps": 42.79}
