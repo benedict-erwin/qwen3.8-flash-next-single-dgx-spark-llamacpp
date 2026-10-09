@@ -1,0 +1,4 @@
+== GGML_CUDA_PDL=0  (6176-token prompt, 6 runs)
+prompt_n 6176 distinct shas 3 ['51834de0969f', '40e64b5b1e39', '2755e4be6b80', '51834de0969f', '51834de0969f', '51834de0969f'] first_diff_char vs run1: [434, 358, None, None, None]
+== GGML_CUDA_DISABLE_GRAPHS=1  (6176-token prompt, 6 runs)
+prompt_n 6176 distinct shas 5 ['51834de0969f', '562eb999a10c', 'e48381c0b3e1', '2755e4be6b80', '40e64b5b1e39', '51834de0969f'] first_diff_char vs run1: [434, 462, 358, 434, None]

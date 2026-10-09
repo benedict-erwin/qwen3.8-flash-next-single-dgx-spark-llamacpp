@@ -1,0 +1,12 @@
+== GGML_CUDA_TOPK_DETERMINISTIC=1  20000 128 6 1
+prompt_n 6176 distinct shas 1 first_diff_char vs run1: [None, None, None, None, None] decode tok/s median 24.995
+== GGML_CUDA_TOPK_DETERMINISTIC=1  40000 128 6 1
+prompt_n 11805 distinct shas 1 first_diff_char vs run1: [None, None, None, None, None] decode tok/s median 23.735
+== GGML_CUDA_TOPK_DETERMINISTIC=1  12000 128 3 0
+prompt_n 3278 distinct shas 1 first_diff_char vs run1: [None, None] decode tok/s median 25.71
+== GGML_CUDA_TOPK_DETERMINISTIC=0  20000 128 6 1
+prompt_n 6176 distinct shas 6 first_diff_char vs run1: [384, 358, 384, 358, 468] decode tok/s median 25.295
+== GGML_CUDA_TOPK_DETERMINISTIC=0  40000 128 6 1
+prompt_n 11805 distinct shas 4 first_diff_char vs run1: [103, 103, 449, 103, 449] decode tok/s median 24.295
+== GGML_CUDA_TOPK_DETERMINISTIC=0  12000 128 3 0
+prompt_n 3278 distinct shas 1 first_diff_char vs run1: [None, None] decode tok/s median 25.89

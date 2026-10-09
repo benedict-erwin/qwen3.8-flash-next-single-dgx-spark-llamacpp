@@ -1,0 +1,19 @@
+diff --git a/ggml/src/ggml-cuda/top-k.cu b/ggml/src/ggml-cuda/top-k.cu
+index 1f23a8948..0e914a671 100644
+--- a/ggml/src/ggml-cuda/top-k.cu
++++ b/ggml/src/ggml-cuda/top-k.cu
+@@ -233,7 +233,13 @@ void ggml_cuda_op_top_k(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+     // prompt batch brings hundreds of rows.
+     // TODO: Switch to `DeviceSegmentedTopK` for multi-row TopK once implemented
+     // https://github.com/NVIDIA/cccl/issues/6391
+-    if (nrows <= 4) {
++    // DeviceTopK only exists in the not_guaranteed/unsorted flavour: the order of the k
++    // indices, and which of equal keys are kept, change from run to run. The sort path below
++    // is stable, so GGML_CUDA_TOPK_DETERMINISTIC=1 takes it for every shape (sparse-attention
++    // block selection at decode goes through here, and its order feeds the attention reduction).
++    static const bool deterministic = getenv("GGML_CUDA_TOPK_DETERMINISTIC") != nullptr &&
++                                      std::atoi(getenv("GGML_CUDA_TOPK_DETERMINISTIC")) != 0;
++    if (nrows <= 4 && !deterministic) {
+         for (int i = 0; i < nrows; i++) {
+             top_k_cub(pool, src0_d + i * ncols, dst_d + i * k, ncols, k, stream);
+         }

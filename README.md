@@ -131,6 +131,14 @@ HC_FUSE=1 QSA_GATHER=1 ./build-fork.sh           # ~15 min
 FORK=unsloth-hcf UBATCH=1024 ./stack.sh start llamacpp
 ```
 
+The same build carries `patches/topk-deterministic.diff`: with
+`GGML_CUDA_TOPK_DETERMINISTIC=1` in the environment (or in `stack.local`), greedy output
+becomes reproducible run to run beyond ~4k tokens of context, which it otherwise is not —
+the sparse-attention block selection goes through `cub::DeviceTopK`, whose only mode is
+non-deterministic and unsorted, and the order it returns is the order of the attention
+reduction. Costs 1–2% decode at 6–12k context; the measurements are in `OPTIMIZATION.md`
+(2026-10-10). Worth switching on for any evaluation you intend to repeat.
+
 ## Quick start
 
 First-time setup (downloads ~110 GB) is in [`SETUP.md`](SETUP.md). Once that is done:

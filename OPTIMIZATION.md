@@ -1358,3 +1358,53 @@ the optional build now prefills **+32%** (`FORK=unsloth-hcf UBATCH=1024`).
 What is left of the hyper-connection cost: the two inject GEMMs (cutlass f32, ~150 µs each at 512
 tokens, candidate #4) and the grouped norm itself, now one fused launch per mix. The next
 candidates by size are the MoE epilogue (#5) and the `concat_non_cont` of qkvz (#6).
+
+## 2026-10-10: Plan C solved — greedy is non-deterministic because `cub::DeviceTopK` is, by contract
+
+Setup: `unsloth-qsa` (then `unsloth-hcf`), MTP off, `-ub 1024`, temperature 0, `cache_prompt`
+off, identical requests repeated on one server (`runs/profile-2026-10-09/planc.py`, outputs in
+`planc-default.txt`, `planc-knobs.txt`, `planc-topk.txt`).
+
+| Prompt | Runs | Distinct outputs | Where they diverge (char) |
+|---|---|---|---|
+| 47 tokens, 256 out | 3 | 1 | — |
+| 3,278 tokens | 6 | 1 | — |
+| 6,176 tokens | 6 | 3 | 358–375 |
+| 10,122 tokens | 6 | 3 | 310–464 |
+| 11,805 tokens | 6 | 3 | 449–456 |
+
+Reproducible up to ~3.3k tokens of context, not from ~6k on, and the divergence is always well
+into the output (token ~80–110), never at the first token: the prefill is fine, something in
+decode at long context is not. Two things were ruled out by env switches on the 6.2k prompt:
+`GGML_CUDA_PDL=0` (3 distinct of 6) and `GGML_CUDA_DISABLE_GRAPHS=1` (5 distinct of 6).
+
+**Cause, from the source:** `ggml/src/ggml-cuda/top-k.cu` sends every top-k with `nrows <= 4` —
+the decode shape, and MTP verification batches — to `cub::DeviceTopK`, requested with
+`cuda::execution::determinism::not_guaranteed` and `output_ordering::unsorted`. CCCL 3.2's header
+states that these are the *only* supported settings (`static_assert` in `device_topk.cuh`). So
+the k indices come back in a run-dependent order, and among equal keys a run-dependent subset.
+The model's sparse attention selects its blocks with exactly this op once the context exceeds the
+indexer budget (~4k tokens, hence the threshold), and the order of the selected cells is the
+order of the attention reduction — different rounding, occasionally a different argmax. Below the
+budget no selection happens; prompt batches (`nrows > 4`) already use the stable sort path.
+
+**Fix:** `patches/topk-deterministic.diff` adds `GGML_CUDA_TOPK_DETERMINISTIC=1`, which routes
+every shape through the existing stable path (bitonic sort ≤ 1024 columns, `cub` segmented radix
+sort above). Built into `unsloth-hcf` (branch `hcf` at `276b0940d`), applied by
+`HC_FUSE=1 ./build-fork.sh`. Measured on the same prompts, 6 runs each:
+
+| | distinct outputs 6.2k / 11.8k / 3.3k | decode tok/s (MTP off) 6.2k / 11.8k / 3.3k |
+|---|---|---|
+| `GGML_CUDA_TOPK_DETERMINISTIC=0` | 6 / 4 / 1 | 25.3 / 24.3 / 25.9 |
+| `GGML_CUDA_TOPK_DETERMINISTIC=1` | **1 / 1 / 1** | 25.0 / 23.7 / 25.7 |
+
+Cost: 1–2% decode at 6–12k context (a segmented sort of the block scores per step instead of a
+selection); it grows with context and was not measured beyond 12k. `test-backend-ops -o TOP_K`
+passes either way. Not switched on by default in `stack.sh` (a user decision); the env goes into
+`stack.local` for anyone who wants reproducible greedy runs, evals included.
+
+Consequences for earlier conclusions: the 2026-09-06 "greedy is not deterministic — and the
+cause is MTP" was looking at the same op (verification batches are `nrows <= 4` too); MTP made it
+more visible, it was never the cause. Every greedy comparison in this document made above ~4k
+context without this switch carries that noise; the GSM8K/HumanEval+ numbers (1–2k prompts) do
+not, the 30k-prefix GSM8K (`2026-09-06`) does.

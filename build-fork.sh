@@ -16,8 +16,11 @@
 #   FORK=unsloth-hcf UBATCH=1024 ./stack.sh start llamacpp
 # The third patch fuses the hyper-connection combine (REPEAT, SCALE, sigmoid, SCALE, MUL, ADD over
 # the residual) into one CUDA kernel and reorders the graph so the chain is contiguous; +5% prefill
-# at -ub 1024, output bit-identical (OPTIMIZATION.md 2026-10-09). Written against the QSA tree,
-# so it needs QSA_GATHER=1. Optional.
+# at -ub 1024 (OPTIMIZATION.md 2026-10-09/10). Written against the QSA tree, so it needs
+# QSA_GATHER=1. Also applies patches/topk-deterministic.diff: with GGML_CUDA_TOPK_DETERMINISTIC=1
+# in the environment the sparse-attention block selection uses a stable sort instead of
+# cub::DeviceTopK, which makes greedy output reproducible beyond ~4k context (-1..2% decode).
+# Optional.
 #
 # How: the fork's release tag is a manifest, not a tree. CI assembles upstream <tag> + the
 # PR commits pinned in scripts/unsloth/pr-set.json (merged in order). patches/compose-mix.py
@@ -39,6 +42,7 @@ SRC="forks/src-mix-$UPSTREAM_TAG"
 PATCH=patches/mmq-ids-tail-padding.patch
 PATCH_QSA=patches/unsloth-pr165-qsa-gather.diff
 PATCH_HCF=patches/hc-combine-fusion.diff
+PATCH_TOPK=patches/topk-deterministic.diff   # applied with HC_FUSE=1: GGML_CUDA_TOPK_DETERMINISTIC=1 (OPTIMIZATION.md 2026-10-10)
 
 command -v nvcc >/dev/null || { echo "nvcc not found: install the CUDA toolkit first (13.0 was used here)" >&2; exit 1; }
 [ -d "$MANIFEST/.git" ] || git clone -q --depth 1 --branch "$TAG" https://github.com/unslothai/llama.cpp "$MANIFEST"
@@ -65,12 +69,19 @@ command -v nvcc >/dev/null || { echo "nvcc not found: install the CUDA toolkit f
   elif git apply --reverse --check "../../$PATCH_HCF" 2>/dev/null; then
     git apply --reverse "../../$PATCH_HCF"; echo "[patch] removed $PATCH_HCF (HC_FUSE=0)"
   fi
+  if [ "$HC_FUSE" = 1 ]; then
+    if git apply --check "../../$PATCH_TOPK" 2>/dev/null; then git apply "../../$PATCH_TOPK"; echo "[patch] applied $PATCH_TOPK"
+    elif git apply --reverse --check "../../$PATCH_TOPK" 2>/dev/null; then echo "[patch] already applied $PATCH_TOPK"
+    else echo "!! $PATCH_TOPK does not apply" >&2; exit 1; fi
+  elif git apply --reverse --check "../../$PATCH_TOPK" 2>/dev/null; then
+    git apply --reverse "../../$PATCH_TOPK"; echo "[patch] removed $PATCH_TOPK (HC_FUSE=0)"
+  fi
   cmake -B build -S . -DGGML_CUDA=ON -DGGML_CUDA_CUB_3DOT2=ON \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=native -DLLAMA_CURL=OFF
   cmake --build build -j"${JOBS:-8}" --target llama-server )
 
 mkdir -p "$OUT"
 for f in "$SRC"/build/bin/*; do ln -sf "$PWD/$f" "$OUT/$(basename "$f")"; done
-echo "llama.cpp version: mix $TAG composed locally ($(git -C "$SRC" rev-parse --short HEAD)) + $PATCH$([ "$QSA_GATHER" = 1 ] && echo " + $PATCH_QSA")$([ "$HC_FUSE" = 1 ] && echo " + $PATCH_HCF")" > "$OUT/BUILD_INFO.txt"
+echo "llama.cpp version: mix $TAG composed locally ($(git -C "$SRC" rev-parse --short HEAD)) + $PATCH$([ "$QSA_GATHER" = 1 ] && echo " + $PATCH_QSA")$([ "$HC_FUSE" = 1 ] && echo " + $PATCH_HCF + $PATCH_TOPK")" > "$OUT/BUILD_INFO.txt"
 LD_LIBRARY_PATH="$PWD/$OUT" "$OUT/llama-server" --version 2>&1 | head -1
 echo "FORK READY -> $OUT   (use: FORK=$(basename "$OUT") UBATCH=512 ./stack.sh start llamacpp)"

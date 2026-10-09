@@ -1,0 +1,8 @@
+== 12000 128 6 0
+prompt_n 3278 distinct shas 1 ['74b57f97b346', '74b57f97b346', '74b57f97b346', '74b57f97b346', '74b57f97b346', '74b57f97b346'] first_diff_char vs run1: [None, None, None, None, None]
+== 20000 128 6 1
+prompt_n 6176 distinct shas 3 ['2755e4be6b80', '9af58b22ca6d', '51834de0969f', '51834de0969f', '51834de0969f', '51834de0969f'] first_diff_char vs run1: [375, 358, 358, 358, 358]
+== 40000 128 6 2
+prompt_n 10122 distinct shas 3 ['8f992d1ef2f2', 'c65b37812078', 'ec9b9819b64f', 'c65b37812078', '8f992d1ef2f2', 'c65b37812078'] first_diff_char vs run1: [310, 464, 310, None, 310]
+== 40000 128 6 1
+prompt_n 11805 distinct shas 3 ['7564c90e3838', 'ddf8ce52ec38', '4ee28d1e17d9', 'ddf8ce52ec38', 'ddf8ce52ec38', 'ddf8ce52ec38'] first_diff_char vs run1: [449, 456, 449, 449, 449]
