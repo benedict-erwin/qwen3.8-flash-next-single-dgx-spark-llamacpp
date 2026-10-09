@@ -1199,3 +1199,70 @@ Findings:
    something in the b10798 mix changes the first greedy token `[Spekulasi]`. Cold-prefill numbers
    are unaffected (they do not depend on what the model says). To fix: a different prompt source
    or a stop guard in `bench-stream.py`.
+
+## 2026-10-09: Graph survey — what one prefill layer launches, and what could be fused
+
+Source: the kernel sequence of one 512-token ubatch, in launch order, from the nsys prefill
+capture above (`runs/profile-2026-10-09/prefill-layer-sequence.txt`), mapped onto the graph builder
+in `src/models/qwen4exp.cpp` of the b10798 mix. One layer = **101 kernel launches**, 17.1 ms for a
+linear-attention (GatedDeltaNet) layer, about the same for a QSA attention layer. Dimensions read
+off the launch grids: n_embd 2560, hyper-connection streams hc = 4 (hc_dim 10240), 512 experts /
+10 used, expert FFN width ≈ 640 `[Inference]`, 48 layers of which 36 linear-attention and 12
+attention `[Inference]`.
+
+### Where a GatedDeltaNet layer's 17.1 ms go
+
+| Block (graph function) | Kernels | ms | % |
+|---|---|---|---|
+| MoE expert GEMMs: gate, up, down (`mul_mat_q` ×3, grids 10240/10240/40960) | 3 | 9.83 | 57.5 |
+| MoE glue: `mm_ids_helper` ×3, `quantize_mmq_q8_1` ×3, SwiGLU, `moe_weighted_reduction` | 8 | 0.65 | 3.8 |
+| hyper-connection `build_hc_mix` ×2 (grouped RMS norm + gamma, low-rank down/up, sigmoid gate, 3 stream adds, scale, inject GEMM) | ~15 ×2 | 2.2 | 13 |
+| hyper-connection `build_hc_combine` ×2 (sigmoid/scale on inject, `repeat`, `mul`, `add` over the full [2560,4,512] residual) | 6 ×2 | 0.93 | 5.4 |
+| GDN core: `gated_delta_net`, gated norm, out projection | 8 | 2.07 | 12 |
+| qkvz projection + `concat_non_cont` + conv state + `ssm_conv` + 2× `l2_norm` + beta/alpha | ~15 | 1.0 | 6 |
+| shared expert (3 small GEMMs, gate GEMV, sigmoid, 3 `k_bin_bcast`) | ~12 | 0.35 | 2 |
+| router + top-k (softmax, argsort, get_rows, sum, clamp, div — **not** hitting ggml's fused top-k) | 7 | 0.14 | 0.8 |
+
+An attention layer swaps the GDN block for flash-attn (1.37 ms) plus the QSA indexer: FWHT,
+copies, `set_rows`, `init_indices`, a **723 µs cub segmented sort**, fills — ≈1.75 ms of
+bookkeeping per layer per ubatch, i.e. the sparse-attention index costs more than the attention.
+
+Two things the sequence makes concrete:
+
+- **The expert GEMMs are not compute-bound at `-ub 512`; they are weight-streaming-bound.**
+  Each ubatch picks 5120 (token, expert) pairs over 512 experts, so every expert is touched and
+  the whole 1.49 GiB of a layer's experts is read once per ubatch: a floor of 5.5 ms at 273 GB/s
+  against 9.8 ms measured (56% of the floor's bandwidth). That is why `-ub 1024` gave +18% (the
+  weights are read half as often per token) and why there is a hard structural ceiling here:
+  perfect kernels at `-ub 512` would give ≈1,900 tok/s, at `-ub 1024` ≈3,800 `[estimate]`.
+  TensorFold's 2,300 at 2048 rows is their compute bound, not ours.
+- **The hyper-connection scaffolding costs ~3.1 ms per layer (18%) and is pure elementwise
+  traffic over the 21 MB [2560, 4, 512] residual.** ggml's `rms_norm+mul` fusion does not fire
+  because the grouped norm is `rms_norm → reshape → mul` (the fusion wants `mul->src[0]` to be
+  the norm node itself), the three stream adds are not fused (the multi-add fusion needs each add's
+  `src[0]` to be the previous add and same layouts — they are views at different offsets), and
+  `build_hc_combine` is four separate passes over the residual.
+
+### Fusion candidates, ranked by saved time per layer `[estimate]`
+
+| # | Fusion | Today | Target | Saves/layer | Of prefill |
+|---|---|---|---|---|---|
+| 1 | `hc_combine` as one kernel: `res += 2·σ(inject/hc)[s] · block_out` over the 4 streams (reads residual + block_out, writes residual once; drops `repeat`, `scale`, `sigmoid`, `mul`, `add`) | 0.47 ms ×2 | ~0.17 ×2 | 0.6 ms | 3.5% |
+| 2 | `hc_mix` tail: sigmoid-gate × xn, sum over streams, ÷hc in one pass writing `mixed` directly (drops the 21 MB `gated` write, 3 adds, scale) | 0.29 ×2 | ~0.12 ×2 | 0.35 ms | 2% |
+| 3 | `hc_mix` grouped norm: teach the `rms_norm+mul` fusion to look through the reshape (gamma is [hc_dim] over rows of n_embd) | 0.34 ×2 | ~0.15 ×2 | 0.38 ms | 2.2% |
+| 4 | inject GEMM (hc_dim → 4, cutlass f32 at 139 GB/s, 151 µs) folded into the norm kernel's epilogue as 4 dot products per token | 0.15 ×2 | ~0 | 0.3 ms | 1.7% |
+| 5 | MoE epilogue: `moe_weighted_reduction` + shared-expert sigmoid-gate × + add (3 `k_bin_bcast`) into one accumulate | 0.4 | ~0.15 | 0.25 ms | 1.5% |
+| 6 | qkvz: write `wqkv` and `wqkv_gate` outputs into one buffer so `concat_non_cont` (272 µs) disappears — a graph change, no kernel | 0.27 | 0 | 0.27 ms | 1.6% |
+| 7 | QSA indexer: top-k selection instead of a full segmented sort (attention layers only) | 0.72 ×12 layers | ~0.2 | 0.5 ms ×12 | 0.8% |
+| 8 | router top-k: find why the existing fused top-k rejects this graph (softmax gating with `expert_weights_scale`) | 0.14 | 0.03 | 0.1 ms | 0.6% |
+| 9 | gate+up expert GEMM in one `mul_mat_q` launch (one `mm_ids_helper`/quantize, one plan) | 0.2 glue | ~0.05 | 0.15 ms | 0.9% |
+
+Sum of 1–9: ≈2.9 ms of 17.1 → **≈15% prefill** if all land, 1–3 alone ≈8% for the least risk
+(elementwise only, greedy output must be bit-identical, each testable with `test-backend-ops`).
+None of it touches the expert GEMM, which stays the 57% elephant: the next step after fusion is the
+MMQ kernel itself, where the floor arithmetic above says `-ub 1024` plus a kernel at ~85% of
+bandwidth would put prefill near 1,500–1,800 tok/s `[estimate]`.
+
+Decode is a different picture (section above: 50% dense GEMV, 28% expert GEMV, 207k tiny launches
+at 1.5–3 µs each inside CUDA graphs). Fusions 1–4 remove ~15 launches per layer there too, but at
+one token each pass is a few µs, so the decode gain is launch-floor only, a few percent.
