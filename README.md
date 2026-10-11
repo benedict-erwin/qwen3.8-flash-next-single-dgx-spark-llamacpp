@@ -139,6 +139,15 @@ non-deterministic and unsorted, and the order it returns is the order of the att
 reduction. Costs 1–2% decode at 6–12k context; the measurements are in `OPTIMIZATION.md`
 (2026-10-10). Worth switching on for any evaluation you intend to repeat.
 
+It also carries `patches/mmvq-spark-prefetch.diff`: the L2 prefetch that upstream added to
+the decode GEMV for the DGX Spark after our base tag (PR #26705), extended here to the
+multi-token MoE kernel. +2.3–3.4% decode on matched prompts (`-ub 512`, four prompt pairs),
+no effect on prefill; `GGML_CUDA_MMVQ_PREFETCH=0` switches it off at runtime. The same
+session found that the decode GEMV itself already runs at 85–90% of the memory bus in
+isolation, and that the slow launches in the real graph are the ones that follow a
+compute-only phase — a memory power-state effect of the SoC, not a kernel defect
+(`OPTIMIZATION.md`, 2026-10-11).
+
 ## Quick start
 
 First-time setup (downloads ~110 GB) is in [`SETUP.md`](SETUP.md). Once that is done:
@@ -422,7 +431,7 @@ copy what you like, ignore the rest. [`pi/README.md`](pi/README.md) explains eac
 | `download-mtp.sh` | MTP draft head, 3.85 GiB |
 | `download-mmproj.sh` | vision projector, 0.85 GiB — enables images |
 | `download-fork.sh` | Unsloth llama.cpp prebuilt — required for MTP (`TAG=` for another release) |
-| `build-fork.sh` | rebuild that prebuilt's exact composition from source with the one-line MMQ crash fix; `QSA_GATHER=1` adds the long-context gather patch, `HC_FUSE=1` the hyper-connection kernel fusions (`patches/`) |
+| `build-fork.sh` | rebuild that prebuilt's exact composition from source with the one-line MMQ crash fix; `QSA_GATHER=1` adds the long-context gather patch, `HC_FUSE=1` the hyper-connection kernel fusions, the deterministic top-k and the decode GEMV prefetch (`patches/`) |
 | `bench.sh` | short-prompt decode/prefill benchmark against llama.cpp; superseded by `bench-stream.py` |
 | `bench-code.sh` | coding-shaped benchmark against llama.cpp |
 | `bench-stream.py` | streaming benchmark; the only one valid for comparing across backends |

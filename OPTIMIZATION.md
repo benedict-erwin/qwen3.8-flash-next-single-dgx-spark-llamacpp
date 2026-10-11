@@ -1437,3 +1437,114 @@ End state of the optional build (`hcf5-ub1024`): prefill **791 / 796 / 801 tok/s
 scaffolding went from 18% of prefill to ~8% (one norm, one tail, one combine, one skinny GEMM per
 mix/combine); what remains in prefill is the expert GEMM (now ~65% of GPU time) and the per-layer
 GDN/attention work. Next is the MMQ `MUL_MAT_ID` kernel, not another elementwise fusion.
+
+## 2026-10-11: Decode GEMV (`mul_mat_vec_q`) — the kernel is fine, the SoC's memory power state is not
+
+Goal: the decode target from the 2026-10-09 profile, the dense per-token GEMV (53% of decode GPU time)
+and the expert GEMV (28%). Data: `runs/profile-2026-10-09/hcf4-ub1024-decode_cuda_gpu_kern_sum.csv` and
+the matching nsys sqlite (per-launch grid sizes, `tmp/`), the GGUF headers (tensor shapes and types),
+a cold-L2 harness (`tmp/mmvq-bench/`), and `runs/bench-stream2.jsonl` labels `hcf6-*`.
+
+### What the model actually multiplies per decode step
+
+| Tensor (per layer) | Shape | Type | Bytes | Count |
+|---|---|---|---|---|
+| `attn_qkv` | 2560 → 10240 | Q8_0 | 27.9 MB | 36 (GDN layers) |
+| `attn_gate` | 2560 → 6144 | Q8_0 | 16.7 MB | 36 |
+| `ssm_out` | 6144 → 2560 | Q8_0 | 16.7 MB | 36 |
+| `attn_q` / `attn_output` | 2560 → 12288 / 6144 → 2560 | Q8_0 | 33.4 / 16.7 MB | 12 (attention layers) |
+| `hc_*_up` / `hc_*_down` | 320 → 10240 / 10240 → 320 | Q8_0 | 3.5 MB | 4 per layer |
+| shared expert gate/up/down | 2560 ↔ 640 | Q8_0 | 1.7 MB | 3 per layer |
+| routed experts gate/up | 2560 → 640 × 512 | Q4_K | 0.92 MB per expert | 10 per token |
+| routed experts down | 640 → 2560 × 512 | **Q5_1** | 1.23 MB per expert | 10 per token |
+| `output` (and the MTP head's) | 2560 → 248320 | Q8_0 | 675 MB | 1 per forward |
+
+A 4-token verification step streams ≈4.5 GB of dense weights plus up to 40 distinct experts per layer
+(≤5.9 GB); each draft-head forward streams 0.83 GB, dominated by the 675 MB vocabulary projection.
+
+### Per-launch bandwidth in the real decode graph (hcf4, 256 tokens, n=4 target steps)
+
+| Launch | Server | Cold-L2 harness, same shape |
+|---|---|---|
+| `output` 1-column (draft head) | 2825 µs = 239 GB/s | 2696 µs = 250 GB/s |
+| `output` 4-column | 3260 µs = 207 GB/s | 2786 µs = 242 GB/s |
+| `attn_qkv` 4-column | 134 µs = 208 GB/s | 118 µs = 237 GB/s |
+| `ssm_out` 4-column | 77 µs = 217 GB/s | 74 µs = 225 GB/s |
+| **`attn_gate` 4-column** | **122 µs = 137 GB/s** | 71 µs = 234 GB/s |
+| experts gate+up fused, Q4_K, 4 tokens | 316 µs ≈ 233 GB/s (upper bound on bytes) | 182 µs (unfused) = 203 GB/s |
+| experts down, Q5_1, 4 tokens | 168 µs | 204 µs = 240 GB/s |
+
+Two things are wrong with the obvious reading of this table. First, `test-backend-ops perf` cannot
+measure these shapes: it re-reads one matrix, and anything under the 24 MB L2 of the GB10 reports
+700–1200 GB/s. The harness (`tmp/mmvq-bench/mmvq_bench.cpp`) multiplies N distinct copies (≥256 MB
+per graph) so every launch streams from DRAM, which is what a decode step does. Second, in that
+harness the kernel already runs at 85–90% of the 273 GB/s bus on every shape over 16 MB, at 1 to 4
+columns. The kernel is not the problem.
+
+### Why `attn_gate` takes 122 µs in the server and 71 µs in isolation
+
+`attn_gate` is built next to `attn_qkv` in `qwen4exp.cpp`, but ggml's DFS places it where it is
+consumed: directly after the GatedDeltaNet core, ssm_norm and a quantize, i.e. after ~50 µs during
+which the SMs are busy and DRAM is idle. `ssm_out`, the same size, follows `attn_gate` (DRAM already
+streaming) and runs at full speed. The harness reproduces the shape of the effect:
+
+| Inserted before each GEMV | GEMV `[2560→6144]` n=4 |
+|---|---|
+| nothing | 71 µs |
+| 27 µs of tiny kernels | 74 µs |
+| 55–110 µs of tiny kernels | 82–88 µs |
+| 66 µs of L2-resident f32 matmul (SMs busy, DRAM idle) | 89 µs |
+| 132 µs of the same | 100 µs |
+
+The longer the DRAM-idle phase before a bandwidth kernel, the slower that kernel starts; a 40 GB
+working set costs only 5% (TLB is not the cause); SM clock is flat at 2405 MHz throughout
+(`nvidia-smi`); `nsys --gpu-metrics` needs admin perf-counter access, so the memory clock cannot be
+observed directly. `[Inference]` This is the SoC's memory/fabric power management ramping after a
+quiet period, not anything in ggml. A kernel cannot fix it; graph scheduling can, by keeping DRAM busy
+across those phases.
+
+### What was done
+
+1. **Upstream PR #26705 ported** (merged 2026-09-07, after our b10798 base): an L2 prefetch two loop
+   iterations ahead, compiled only for `__CUDA_ARCH__ == DGX Spark`. Only the `mmvq.cu` half; the
+   branchless Q4_K/Q5_K unpack in `vecdotq.cuh` was left out (no gain on Spark per the PR's own data,
+   and it forces a full MMQ rebuild). The same prefetch was added to the multi-token MoE kernel
+   `mul_mat_vec_q_moe`, which the upstream patch does not touch. Runtime switch
+   `GGML_CUDA_MMVQ_PREFETCH=0` for A/B without rebuilding.
+2. Harness A/B, cold L2: dense Q8_0 +0.5–2% (noise); **Q4_K experts, 4 tokens, 183.6 → 162.7 µs
+   (−11%); 2 tokens 92.7 → 84.1 µs (−9%)**; Q5_1 experts unchanged (K = 640 is two loop iterations,
+   the prefetch never fires), so Q4_1/Q5_1 were not added to the type list. The prefetch does not
+   reduce the post-idle penalty (155.3 vs 155.1 µs with a matmul in front). `test-backend-ops`
+   MUL_MAT and MUL_MAT_ID against the CPU reference: all pass.
+3. **Multi-stream graph execution** (`GGML_CUDA_GRAPH_OPT=1`, already in this tree, default off):
+   `graph_optimize` detects fork/join regions (a node with fan-out ≥ 2, independent branches, one join)
+   and runs the branches on separate streams. The GDN layer is exactly that: `input` → [qkv → conv →
+   core → norm] and [gate GEMV] → join at the gating multiply, so the gate GEMV can overlap the core.
+
+### Server results (`stack.local`: `unsloth-hcf`, `-ub 512`, ctx 262144, 5 runs each, prompts 1/2/4/5 valid)
+
+| Label | Prompt 1 (kv-cache) | Prompt 2 (arg) | Prompt 4 (kv-cache, cached prefix) | Prompt 5 (arg, cached prefix) | Median decode |
+|---|---|---|---|---|---|
+| `hcf6-pf0-ub512` (prefetch off) | 37.01 | 41.50 | 36.33 | 42.73 | 39.25 tok/s |
+| `hcf6-pf1-ub512` (prefetch on) | 38.00 | 42.54 | 37.37 | 44.20 | **40.27 tok/s** |
+| `hcf6-pf1-gopt-ub512` (+ `GGML_CUDA_GRAPH_OPT=1`) | 37.22 | 42.56 | 36.97 | 43.35 | 39.89 tok/s |
+
+Prefetch: +2.3–3.4% on all four prompt pairs, in line with the harness (−11% on the expert
+GEMV that is 17% of decode, +1–2% on the dense half). TTFT is identical across the three (the
+prefetch is not on the MMQ prefill path); runs 4/5 reuse the prompts of runs 1/2 and hit the
+prompt cache, so only decode is comparable in this five-run form. SM clock during decode was flat
+at 2470–2515 MHz, GPU rail 67–69 W average — the clock is not what differs between the harness
+and the server either.
+
+Multi-stream: no change, and a verbose run (`-v`) shows why — `graph_optimize` logged no
+"Adding stream" line at all, so the fork/join detector found no region in this graph (the
+GDN branch is not recognised as it is built; the likely culprits are the hyper-connection
+fusion's node reordering and the quantize/view nodes between fork and join, not verified).
+Making the gate GEMV overlap the GatedDeltaNet core is the remaining decode lever on this
+model: 36 launches of ~120 µs per step that the harness says should take 71 µs, ≈4% of a step
+`[estimate]`. That is graph-scheduling work, not kernel work.
+
+Shipped: `patches/mmvq-spark-prefetch.diff`, applied by `HC_FUSE=1 ./build-fork.sh` next to the
+fusion and top-k patches. The harness lives in `tmp/` (not tracked); its results above are in
+this section. Upstream PR #29184 (shared experts fused into MMVQ, 2026-10-03, ≈144 small launches
+per step) conflicts with the hyper-connection fusion in `ggml-cuda.cu` and was not ported.
