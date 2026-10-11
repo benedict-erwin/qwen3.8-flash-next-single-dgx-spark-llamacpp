@@ -89,3 +89,5 @@
 {"label": "hcf6-pf1-gopt-ub512", "run": 3, "src": "llama.cpp/common/arg.cpp", "ttft_s": 15.89, "total_s": 21.89, "chunks": 256, "tokens": 256, "chars": 942, "finish": "length", "decode_tps": 42.56}
 {"label": "hcf6-pf1-gopt-ub512", "run": 5, "src": "llama.cpp/src/llama-kv-cache.cpp", "ttft_s": 0.26, "total_s": 7.16, "chunks": 256, "tokens": 256, "chars": 1057, "finish": "length", "decode_tps": 36.97}
 {"label": "hcf6-pf1-gopt-ub512", "run": 6, "src": "llama.cpp/common/arg.cpp", "ttft_s": 0.26, "total_s": 6.14, "chunks": 256, "tokens": 256, "chars": 952, "finish": "length", "decode_tps": 43.35}
+{"label": "hcf6-public-ub512", "run": 2, "src": "llama.cpp/src/llama-kv-cache.cpp", "ttft_s": 18.58, "total_s": 25.35, "chunks": 256, "tokens": 256, "chars": 1004, "finish": "length", "decode_tps": 37.69}
+{"label": "hcf6-public-ub512", "run": 3, "src": "llama.cpp/common/arg.cpp", "ttft_s": 15.84, "total_s": 21.85, "chunks": 256, "tokens": 256, "chars": 942, "finish": "length", "decode_tps": 42.41}

@@ -1545,6 +1545,8 @@ model: 36 launches of ~120 µs per step that the harness says should take 71 µs
 `[estimate]`. That is graph-scheduling work, not kernel work.
 
 Shipped: `patches/mmvq-spark-prefetch.diff`, applied by `HC_FUSE=1 ./build-fork.sh` next to the
-fusion and top-k patches. The harness lives in `tmp/` (not tracked); its results above are in
+fusion and top-k patches. The public path was rebuilt from that script (all five patches applied
+cleanly, 3.5 min incremental) and re-measured: `hcf6-public-ub512` 37.7 / 42.4 tok/s on prompts 1/2,
+median 40.05, same output lengths as the worktree build — the shipped build is the measured one. The harness lives in `tmp/` (not tracked); its results above are in
 this section. Upstream PR #29184 (shared experts fused into MMVQ, 2026-10-03, ≈144 small launches
 per step) conflicts with the hyper-connection fusion in `ggml-cuda.cu` and was not ported.
