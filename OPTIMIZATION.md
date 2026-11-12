@@ -1550,3 +1550,25 @@ cleanly, 3.5 min incremental) and re-measured: `hcf6-public-ub512` 37.7 / 42.4 t
 median 40.05, same output lengths as the worktree build — the shipped build is the measured one. The harness lives in `tmp/` (not tracked); its results above are in
 this section. Upstream PR #29184 (shared experts fused into MMVQ, 2026-10-03, ≈144 small launches
 per step) conflicts with the hyper-connection fusion in `ggml-cuda.cu` and was not ported.
+
+## 2026-11-12: Fix: the `hc_mix` tail fusion aborted the server on some short prompts
+
+Symptom: `GGML_ASSERT(count < 32) failed` in `ggml_can_fuse_subgraph`, called from
+`ggml_cuda_try_fuse`, on the `HC_FUSE=1` build only. Found while running a batch of short chat
+prompts, and reproduced with a raw 20-token prompt sent with `cache_prompt: false`; prompts of 12,
+13 and 17 tokens passed.
+
+Cause: the mix-tail matcher (fusion #2 above) starts at any sigmoid that is followed two nodes later
+by a `RESHAPE`, and takes `hc` from that reshape's `ne[1]`. It accepted `2 <= hc <= 16`, but the
+pattern is `2*hc + 4` nodes long and `ggml_can_fuse_subgraph` asserts on 32 or more. For this
+model `hc` is 4, but other sigmoid -> mul -> reshape chains exist (the gated norm at the end of
+each GatedDeltaNet block reshapes to `[.., n_seq_tokens]`), so a batch whose shape gives 14-16 there
+reaches the assert before the wiring checks reject it. `[Unverified]` which reshape fires for a
+20-token prompt; the bound is wrong regardless of which one does.
+
+Fix (`patches/hc-combine-fusion.diff`): accept `hc <= 13`, so the pattern is at most 30 nodes. A
+non-hyper-connection chain that still passes every wiring check computes the same expression, so
+fusing it stays correct. After the rebuild, uncached prompts of 1-80, 512, 525-532, 1038-1042 and
+2060 tokens (random token ids) were all processed and the server logged no assert; 531 came back as
+HTTP 500 "output does not match the expected Content-only format", the response parser rejecting
+what the model generated from that input, with the server still up.
