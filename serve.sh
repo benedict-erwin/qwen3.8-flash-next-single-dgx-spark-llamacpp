@@ -32,7 +32,8 @@ else
   # next to the binary explicitly.
   export LD_LIBRARY_PATH="$PWD/llama.cpp/$BUILD/bin${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
-MODEL=models/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf
+# MODEL=<path> serves another GGUF (first shard of a split); the default is the download.
+MODEL="${MODEL:-models/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf}"
 MTP=models/MTP/mtp-Qwen3.8-Flash-Next-Q8_0.gguf
 MMPROJ=models/mmproj/mmproj-BF16.gguf
 PORT=18080
@@ -100,6 +101,7 @@ if (( VISION )); then
   EXTRA+=(--mmproj "$MMPROJ")
 fi
 
+echo "[serve] model=$MODEL"
 echo "[serve] build=$BUILD config=$LABEL mmap=$USE_MMAP vision=$VISION nmax=$NMAX pmin=$PMIN ctx=$CTX alias=$ALIAS host=$HOST:$PORT auth=$([ -n "$API_KEY" ] && echo yes || echo no)"
 # LAUNCHER wraps the binary for profiling, e.g. LAUNCHER="nsys launch -t cuda",
 # so a profiled run still goes through stack.sh and its memory preflight.
