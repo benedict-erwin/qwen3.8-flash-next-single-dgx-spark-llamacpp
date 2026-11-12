@@ -1619,3 +1619,37 @@ local build: 34.22 / 38.55 and 38.08 / 44.83, median 38.31 — slower on the two
 faster on the two cached ones, with identical text and acceptance within each pair, cause not
 investigated. It held 111 GiB after load against 95–96 GiB for the local build at the same settings
 (8 GiB left available), so it is not a drop-in replacement at ctx 262144.
+
+### Same day: accuracy gate and other workloads with the Q4_K draft head
+
+**Accuracy** (`bench-accuracy.py`, thinking off, temperature 0, 1 slot; `runs/accuracy-2026-11-12.jsonl`
+label `hcf-mtpq4k`). The Q8_0-head reference is a run of the same build and settings from earlier
+the same day, which is not in `runs/`; the 2026-09-04 row is the tracked reference
+(`runs/accuracy-2026-09-04.jsonl`, fork b10715).
+
+| Draft head | GSM8K 300 (`acc_final_para`) | HumanEval+ base | HumanEval+ plus | GSM8K wall time |
+|---|---|---|---|---|
+| Q8_0, 2026-09-04 | 97.33 | 96.34 | 93.90 | 2258 s |
+| Q8_0, same day, same build | 97.33 | 96.34 | 95.12 | 2195 s |
+| `output.weight` Q4_K | 97.33 | 96.34 | 93.90 | 2062 s |
+
+GSM8K and HumanEval+ base are identical. HumanEval+ plus is two problems lower than the same-day
+Q8_0 run (124 and 129 fail only with the Q4_K head; the other 8 failures are shared) and equal to
+the 2026-09-04 figure. One run per side, so two problems cannot be told apart from the run-to-run
+variation that different drafts cause; `[Inference]` the head changes speed, not what the model can
+solve.
+
+**Prose and thinking** (`/v1/chat/completions`, 400 tokens, temperature 0, a different prompt for
+every request, warm-up discarded, tokens from `usage`; two starts per head, alternated;
+`runs/bench-chat-2026-11-12.jsonl`, labels `chat-hcf-mtpq8-a/b`, `chat-hcf-mtpq4k-a/b`; the script
+is local, not tracked):
+
+| Workload | Q8_0 head | Q4_K head | Change | Acceptance Q8_0 → Q4_K |
+|---|---|---|---|---|
+| Prose, thinking off (5 prompts) | 33.43 tok/s (n=8) | 34.77 (n=10) | +4% | 0.60 → 0.62 |
+| Thinking on (4 prompts) | 40.36 (n=8) | 41.34 (n=8) | +2%, inside the spread | 0.83 → 0.82 |
+
+Prose is faster on every prompt that has both sides (+1% to +6%); thinking is mixed per prompt
+(−7% to +5%). GSM8K finished 6% sooner and HumanEval+ in the same time (934 s against 939 s). So the
++10% above is the best case (raw-completion code prompts); across workloads the Q4_K head is worth
+0–6%, and it never measured slower outside the thinking spread.
