@@ -1443,7 +1443,7 @@ GDN/attention work. Next is the MMQ `MUL_MAT_ID` kernel, not another elementwise
 Goal: the decode target from the 2026-10-09 profile, the dense per-token GEMV (53% of decode GPU time)
 and the expert GEMV (28%). Data: `runs/profile-2026-10-09/hcf4-ub1024-decode_cuda_gpu_kern_sum.csv` and
 the matching nsys sqlite (per-launch grid sizes, `tmp/`), the GGUF headers (tensor shapes and types),
-a cold-L2 harness (`tmp/mmvq-bench/`), and `runs/bench-stream2.jsonl` labels `hcf6-*`.
+a cold-L2 harness (`tools/mmvq-bench/`), and `runs/bench-stream2.jsonl` labels `hcf6-*`.
 
 ### What the model actually multiplies per decode step
 
@@ -1476,7 +1476,7 @@ A 4-token verification step streams ≈4.5 GB of dense weights plus up to 40 dis
 
 Two things are wrong with the obvious reading of this table. First, `test-backend-ops perf` cannot
 measure these shapes: it re-reads one matrix, and anything under the 24 MB L2 of the GB10 reports
-700–1200 GB/s. The harness (`tmp/mmvq-bench/mmvq_bench.cpp`) multiplies N distinct copies (≥256 MB
+700–1200 GB/s. The harness (`tools/mmvq-bench/mmvq_bench.cpp`) multiplies N distinct copies (≥256 MB
 per graph) so every launch streams from DRAM, which is what a decode step does. Second, in that
 harness the kernel already runs at 85–90% of the 273 GB/s bus on every shape over 16 MB, at 1 to 4
 columns. The kernel is not the problem.
@@ -1547,7 +1547,7 @@ model: 36 launches of ~120 µs per step that the harness says should take 71 µs
 Shipped: `patches/mmvq-spark-prefetch.diff`, applied by `HC_FUSE=1 ./build-fork.sh` next to the
 fusion and top-k patches. The public path was rebuilt from that script (all five patches applied
 cleanly, 3.5 min incremental) and re-measured: `hcf6-public-ub512` 37.7 / 42.4 tok/s on prompts 1/2,
-median 40.05, same output lengths as the worktree build — the shipped build is the measured one. The harness lives in `tmp/` (not tracked); its results above are in
+median 40.05, same output lengths as the worktree build — the shipped build is the measured one. The harness is in `tools/mmvq-bench/` (tracked since 2026-11-12, with the raw output under `results/`); its results above are in
 this section. Upstream PR #29184 (shared experts fused into MMVQ, 2026-10-03, ≈144 small launches
 per step) conflicts with the hyper-connection fusion in `ggml-cuda.cu` and was not ported.
 

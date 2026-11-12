@@ -474,6 +474,7 @@ copy what you like, ignore the rest. [`pi/README.md`](pi/README.md) explains eac
 | `bench-longctx.py` | decode speed against context depth (8k–64k by default, `--sizes`) from llama-server's own timings; llama.cpp A/B only, `--fixed` for byte-identity checks |
 | `cache-ratio.py` | prefix-cache hit rate of real usage, reconstructed from the llama-server log |
 | `cache-probe.py` | does resending a turn hit the prefix cache? Generates each turn shape (text, tool call, streaming...), resends it as a client would, reads `cached_tokens`, and diffs the re-rendered history against the generated tokens |
+| `tools/mmvq-bench/` | cold-L2 microbenchmark of the CUDA decode GEMV kernels, without a server (own README) |
 | `bench-accuracy.py` | GSM8K + HumanEval+ through the API, same settings on either backend |
 | `bench-accuracy-longctx.py` | GSM8K behind a fixed long prefix, for attention changes that only engage deep in the context |
 

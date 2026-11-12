@@ -12,4 +12,5 @@ vllm-dgx/
 stack.local
 
 tmp/
+tools/mmvq-bench/mmvq_bench
 __pycache__/
