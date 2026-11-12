@@ -177,6 +177,8 @@ Environment (start llamacpp; all optional, defaults are the measured profile)
   UBATCH=256             Physical batch; 256 avoids the CUDA prefill crash on the prebuilt fork.
   FORK=<name>            Which build under forks/ to run (unsloth-mixfix, unsloth-qsa, ...).
   CTX=131072             Context length passed to serve.sh (262144 = the model's native max).
+  MODEL=<path>           Another GGUF to serve (first shard of a split). Default: the
+                         UD-Q4_K_XL download under models/. The MTP head stays the same.
   HOST=127.0.0.1         Bind address; 'tailscale' resolves the tailnet IP. API_KEY=<key>
                          turns on bearer auth; stack.sh presents it in its own health checks.
   LLAMA_ARG_N_PARALLEL=1 One slot: a strict one-request queue (see README).
@@ -250,7 +252,7 @@ stop)
   vl_up && { docker rm -f "$VL_NAME" >/dev/null; echo ">> container $VL_NAME removed"; }
   for _ in $(seq 1 40); do [ -z "$(lc_pid)" ] && ! vl_up && break; sleep 3; done
   sleep 2; echo ">> $(avail) GiB available now"
-  [ "$RESET" = 1 ] && reset_clock_cap ;;
+  if [ "$RESET" = 1 ]; then reset_clock_cap; fi ;;
 status)
   if [ -n "$CAP" ] || [ "$RESET" = 1 ]; then echo "!! status takes no flags"; exit 2; fi
   p=$(lc_pid)
