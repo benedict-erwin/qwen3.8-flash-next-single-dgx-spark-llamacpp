@@ -185,6 +185,7 @@ Environment (start llamacpp; all optional, defaults are the measured profile)
                          models/mmproj/mmproj-BF16.gguf exists (./download-mmproj.sh).
   MTP=0                  Disable speculative decoding (diagnostics only, decode ~24 tok/s).
   NMAX=3  PMIN=0.50      Speculative draft length and confidence threshold.
+  MTP_MODEL=<gguf>       Another MTP draft head, e.g. the lighter one ./requant-mtp-head.sh writes.
   UBATCH=256             Physical batch; 256 avoids the CUDA prefill crash on the prebuilt fork.
   FORK=<name>            Which build under forks/ to run (unsloth-mixfix, unsloth-qsa, ...).
   CTX=131072             Context length passed to serve.sh (262144 = the model's native max).

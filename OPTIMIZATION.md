@@ -1573,7 +1573,7 @@ fusing it stays correct. After the rebuild, uncached prompts of 1-80, 512, 525-5
 HTTP 500 "output does not match the expected Content-only format", the response parser rejecting
 what the model generated from that input, with the server still up.
 
-## 2026-11-12: Requantizing only the MTP draft head's `output.weight` to Q4_K — +10% decode, no download
+## 2026-11-12: Requantizing only the MTP draft head's `output.weight` to Q4_K — +10% decode on the patched build, +3–4% on the prebuilt, no download
 
 The MTP sidecar carries its own vocabulary projection (`output.weight`, 2560 → 248320, Q8_0,
 644 MiB), separate from the target's. It is streamed once per drafted token, three times per step at
@@ -1641,8 +1641,8 @@ solve.
 
 **Prose and thinking** (`/v1/chat/completions`, 400 tokens, temperature 0, a different prompt for
 every request, warm-up discarded, tokens from `usage`; two starts per head, alternated;
-`runs/bench-chat-2026-11-12.jsonl`, labels `chat-hcf-mtpq8-a/b`, `chat-hcf-mtpq4k-a/b`; the script
-is local, not tracked):
+`runs/bench-chat-2026-11-12.jsonl`, labels `chat-hcf-mtpq8-a/b`, `chat-hcf-mtpq4k-a/b`;
+`bench-chat.py`):
 
 | Workload | Q8_0 head | Q4_K head | Change | Acceptance Q8_0 → Q4_K |
 |---|---|---|---|---|
@@ -1653,3 +1653,21 @@ Prose is faster on every prompt that has both sides (+1% to +6%); thinking is mi
 (−7% to +5%). GSM8K finished 6% sooner and HumanEval+ in the same time (934 s against 939 s). So the
 +10% above is the best case (raw-completion code prompts); across workloads the Q4_K head is worth
 0–6%, and it never measured slower outside the thinking spread.
+
+**The shipped prebuilt** (`FORK=unsloth-b10715`, `-ub 256`, ctx 131072, one slot; alternated Q8_0,
+Q4_K, Q8_0, Q4_K; `runs/bench-stream2.jsonl` labels `nov12-shipped-mtpq8-ub256[-b]`,
+`nov12-shipped-mtpq4k-ub256[-b]`):
+
+| Draft head | kv-cache | arg | Median decode |
+|---|---|---|---|
+| Q8_0, start 1 | 36.29 / 37.10 | 42.76 / 43.23 | 39.93 tok/s |
+| Q8_0, start 2 | 37.49 / 39.27 | both failed (1 token) | 38.38 (kv-cache only) |
+| `output.weight` Q4_K, start 1 | 39.82 / 37.44 | 42.21 / 42.13 | 40.98 |
+| `output.weight` Q4_K, start 2 | 37.33 / 39.27 | 44.01 / 45.49 | 41.64 |
+
+On this build the gain is +3–4% on the medians and the per-prompt ranges overlap (kv-cache mean
+37.5 → 38.5, arg 43.0 → 43.5), against +9–11% on the `HC_FUSE=1` build. `[Speculation]` the
+difference is the DGX Spark prefetch in the patched build's MMVQ kernel, which was measured to
+help Q4_K and not Q8_0 (2026-10-11); not tested. `requant-mtp-head.sh` produces the head with the
+pinned prebuilt's own `llama-quantize`; the file is byte-identical (sha256) to the one made with
+b12284 and measured above. Shipped as an option (`MTP_MODEL=`), not as the default.

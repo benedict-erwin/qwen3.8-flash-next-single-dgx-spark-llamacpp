@@ -58,6 +58,11 @@ resumed with `aria2c -c`, so an interrupted transfer costs nothing.
 `./download-mtp.sh --both` also fetches the Q4_K_M head (66.1% draft acceptance for
 Q8_0 vs 64.4% for Q4_K_M, so Q8_0 is the default).
 
+Optional, a few seconds, no download: `./requant-mtp-head.sh` writes a copy of the Q8_0 head
+with only its vocabulary projection at Q4_K, which decodes 0–10% faster depending on the
+build and the workload. Use it with `MTP_MODEL=models/MTP/mtp-Qwen3.8-Flash-Next-Q8_0-outQ4_K.gguf`, per
+start or as a line in `stack.local` (README, "Optional: a lighter draft head").
+
 ### What the default profile is
 
 `./stack.sh start llamacpp` calls `serve.sh` with the settings that were measured,
@@ -67,7 +72,7 @@ not guessed:
 |---|---|---|
 | Binary | Unsloth prebuilt `b10715-mix-86bd2d3` (`forks/unsloth-b10715`) | `download-fork.sh`, `serve.sh` (`BUILD=fork`) |
 | Weights | UD-Q4_K_XL, experts on GPU, `per_layer_token_embd.weight` pinned to CPU | `serve.sh` |
-| Speculative | MTP draft head Q8_0, `--nmax 3`, `--pmin 0.50` | `stack.sh` (`NMAX=`, `PMIN=`, `MTP=0`) |
+| Speculative | MTP draft head Q8_0, `--nmax 3`, `--pmin 0.50` | `stack.sh` (`NMAX=`, `PMIN=`, `MTP=0`, `MTP_MODEL=`) |
 | KV cache | q8_0 for K and V, flash attention on | `serve.sh` |
 | Context | 131072 | `serve.sh` (`CTX=`) |
 | Physical batch | `-ub 256` | `stack.sh` (`UBATCH=`) |

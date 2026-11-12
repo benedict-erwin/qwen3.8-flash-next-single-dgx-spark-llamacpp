@@ -66,6 +66,33 @@ was also tried (+2.5%, within noise, not adopted). With MTP on, greedy output is
 bit-reproducible at either setting (`OPTIMIZATION.md`, 2026-09-06); `MTP=0` restores exact
 reproducibility at ~24 tok/s.
 
+### Optional: a lighter draft head (`requant-mtp-head.sh`)
+
+The MTP head carries its own vocabulary projection (`output.weight`, 644 MiB at Q8_0), read
+once per drafted token, three times per step. `./requant-mtp-head.sh` writes a copy of the
+downloaded head with only that tensor at Q4_K (341 MiB): a few seconds, no download, the
+original file untouched. Use it per start with
+`MTP_MODEL=models/MTP/mtp-Qwen3.8-Flash-Next-Q8_0-outQ4_K.gguf ./stack.sh start llamacpp`, or
+put that `MTP_MODEL=` line in `stack.local`. It is not the default: the gain depends on the
+build and the workload, measured 2026-11-12 with alternating restarts
+(`runs/bench-stream2.jsonl` labels `nov12-*`, `runs/bench-chat-2026-11-12.jsonl`,
+`runs/accuracy-2026-11-12.jsonl`):
+
+| | Q8_0 head | Q4_K `output.weight` |
+|---|---|---|
+| decode, code prompts, shipped prebuilt (`-ub 256`), median of two starts each | 39.9 / 38.4 tok/s | 41.0 / 41.6 tok/s (+3–4%, per-prompt ranges overlap) |
+| decode, code prompts, `HC_FUSE=1` build (`-ub 512`), same | 39.2 / 38.5 tok/s | 42.7 / 42.7 tok/s (+9–11%) |
+| decode, prose, thinking off (`HC_FUSE=1` build) | 33.4 tok/s | 34.8 tok/s (+4%) |
+| decode, thinking on (`HC_FUSE=1` build) | 40.4 tok/s | 41.3 tok/s (inside the spread) |
+| draft acceptance, code prompts | 0.72–0.85 | 0.81–0.83 |
+| GSM8K 300 / HumanEval+ base / plus | 97.3% / 96.3% / 93.9% (`runs/accuracy-2026-09-04.jsonl`) | 97.3% / 96.3% / 93.9% |
+
+The target model still verifies every drafted token, so the head changes how fast a step is,
+not which tokens the model accepts. A same-day Q8_0 run on the same build scored two
+HumanEval+ plus problems higher (95.1%); with one run per side that is inside the run-to-run
+spread of the Q8_0 head itself. A Q3_K projection and a
+fully Q4_K head were also tried and added nothing (`OPTIMIZATION.md`, 2026-11-12).
+
 ### Optional: build it yourself to drop `-ub 256`
 
 The prefill crash that forces `-ub 256` is upstream issue ggml-org/llama.cpp#27792: the
@@ -168,7 +195,8 @@ file. `API_KEY` can live there too; `chmod 600 stack.local` if it does.
 To keep more than one GGUF at hand (another quant, a re-quantized or patched copy), name each
 one in `stack.local` as `MODEL_<name>=<path to the first shard>` and pick it per start with
 `./stack.sh start llamacpp --model=<name>`. Without the flag the UD-Q4_K_XL download is served
-as before; the MTP head and vision projector stay the same. `./stack.sh status` lists the names
+as before; the MTP head and vision projector stay the same (`MTP_MODEL=<gguf>` swaps the
+head, see "Optional: a lighter draft head"). `./stack.sh status` lists the names
 and shows which model is loaded.
 
 `./stack.sh start llamacpp --clock-cap` additionally caps the GPU clock at 2200 MHz
@@ -432,15 +460,17 @@ copy what you like, ignore the rest. [`pi/README.md`](pi/README.md) explains eac
 | Script | Purpose |
 |---|---|
 | `stack.sh` | start / stop / status / help for either backend, with a memory preflight; `--clock-cap` for a lower-power GPU clock; `--model=NAME` for a named GGUF from `stack.local` |
-| `serve.sh` | launches llama-server directly (`--mtp`, `--nmax`, `--pmin`, `--vision`, `--ngram-mod`, `--mmap`, `CTX=`, `BUILD=`, `FORK=`, `UBATCH=`) |
+| `serve.sh` | launches llama-server directly (`--mtp`, `--nmax`, `--pmin`, `--vision`, `--ngram-mod`, `--mmap`, `CTX=`, `BUILD=`, `FORK=`, `UBATCH=`, `MODEL=`, `MTP_MODEL=`) |
 | `download-parts.sh` | main GGUF, 104 GiB |
 | `download-mtp.sh` | MTP draft head, 3.85 GiB |
+| `requant-mtp-head.sh` | optional lighter draft head: the MTP head's own `output.weight` at Q4_K, seconds, no download; use with `MTP_MODEL=` |
 | `download-mmproj.sh` | vision projector, 0.85 GiB — enables images |
 | `download-fork.sh` | Unsloth llama.cpp prebuilt — required for MTP (`TAG=` for another release) |
 | `build-fork.sh` | rebuild that prebuilt's exact composition from source with the one-line MMQ crash fix; `QSA_GATHER=1` adds the long-context gather patch, `HC_FUSE=1` the hyper-connection kernel fusions, the deterministic top-k and the decode GEMV prefetch (`patches/`) |
 | `bench.sh` | short-prompt decode/prefill benchmark against llama.cpp; superseded by `bench-stream.py` |
 | `bench-code.sh` | coding-shaped benchmark against llama.cpp |
 | `bench-stream.py` | streaming benchmark; the only one valid for comparing across backends |
+| `bench-chat.py` | decode rate on prose and thinking prompts through chat completions (llama.cpp) |
 | `bench-longctx.py` | decode speed against context depth (8k–64k by default, `--sizes`) from llama-server's own timings; llama.cpp A/B only, `--fixed` for byte-identity checks |
 | `cache-ratio.py` | prefix-cache hit rate of real usage, reconstructed from the llama-server log |
 | `cache-probe.py` | does resending a turn hit the prefix cache? Generates each turn shape (text, tool call, streaming...), resends it as a client would, reads `cached_tokens`, and diffs the re-rendered history against the generated tokens |
