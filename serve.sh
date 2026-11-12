@@ -34,7 +34,7 @@ else
 fi
 # MODEL=<path> serves another GGUF (first shard of a split); the default is the download.
 MODEL="${MODEL:-models/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf}"
-MTP=models/MTP/mtp-Qwen3.8-Flash-Next-Q8_0.gguf
+MTP="${MTP_MODEL:-models/MTP/mtp-Qwen3.8-Flash-Next-Q8_0.gguf}"   # MTP_MODEL=<gguf> swaps the draft head
 MMPROJ=models/mmproj/mmproj-BF16.gguf
 PORT=18080
 NMAX=2

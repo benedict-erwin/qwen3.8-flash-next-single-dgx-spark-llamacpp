@@ -1572,3 +1572,50 @@ fusing it stays correct. After the rebuild, uncached prompts of 1-80, 512, 525-5
 2060 tokens (random token ids) were all processed and the server logged no assert; 531 came back as
 HTTP 500 "output does not match the expected Content-only format", the response parser rejecting
 what the model generated from that input, with the server still up.
+
+## 2026-11-12: Requantizing only the MTP draft head's `output.weight` to Q4_K — +10% decode, no download
+
+The MTP sidecar carries its own vocabulary projection (`output.weight`, 2560 → 248320, Q8_0,
+644 MiB), separate from the target's. It is streamed once per drafted token, three times per step at
+`--nmax 3`; in the 2026-10-11 profile those launches were ~11% of decode GPU time. The target
+verifies every draft, so the precision of this one tensor affects acceptance, not what the target
+would accept.
+
+```
+llama-quantize --allow-requantize --output-tensor-type q4_k \
+  models/MTP/mtp-Qwen3.8-Flash-Next-Q8_0.gguf models/MTP/mtp-Qwen3.8-Flash-Next-Q8_0-outQ4_K.gguf Q8_0 16
+```
+
+4 s on this machine (`llama-quantize` from the Unsloth b12284 prebuilt); `output.weight` becomes
+Q4_K, 341 MiB, the other 33 tensors keep their type. `serve.sh` gained `MTP_MODEL=<gguf>` to point at
+another draft head; the default is unchanged.
+
+Server results, `stack.local` as before (`unsloth-hcf`, `-ub 512`, ctx 262144, nmax 3, p-min 0.50),
+one start per row, 5 requests, prompts 1/2 cold and 4/5 with the cached prefix
+(`runs/bench-stream2.jsonl`, labels in the first column):
+
+| Label | Draft head | kv-cache | arg | Median decode |
+|---|---|---|---|---|
+| `nov12-hcf-ub512` | Q8_0 (as downloaded) | 37.02 / 35.59 | 41.32 / 42.43 | 39.17 tok/s |
+| `nov12-hcf-ub512-b` | Q8_0 | 35.93 / 36.03 | 40.89 / 43.08 | 38.46 |
+| `nov12-hcf-mtpq4k-ub512` | `output.weight` Q4_K | 40.72 / 41.24 | 44.12 / 44.84 | **42.68** |
+| `nov12-hcf-mtpq4k-ub512-b` | `output.weight` Q4_K | 40.64 / 41.52 | 44.47 / 43.86 | **42.69** |
+| `nov12-hcf-mtpq3k-ub512` | `output.weight` Q3_K | 40.40 / 42.64 | 44.52 / 44.87 | 43.58 |
+| `nov12-hcf-mtpq4kall-ub512` | whole sidecar Q4_K_M | 41.62 / 39.87 | 44.50 / 43.16 | 42.39 |
+
+The Q8_0 and Q4_K starts were alternated (Q8_0, Q4_K, Q8_0, Q4_K). Median +9–11%; per prompt about
++13% on `llama-kv-cache.cpp` (ranges do not overlap) and about +5% on `arg.cpp` (ranges touch).
+Draft acceptance did not drop: 0.81–0.83 with the Q4_K head against 0.72–0.85 with Q8_0 (server
+log, same four requests). Memory after load and TTFT are unchanged. Q3_K and an all-Q4_K sidecar,
+one start each, are within the spread of the Q4_K head: the remaining draft-head bytes are no longer
+what limits a step. The generated text differs from the Q8_0 runs for the same prompt (different
+drafts change the verification batches, the effect described under 2026-09-06). `[Inference]` that is
+not a quality change, because the target still verifies every token; no accuracy run was done with
+the requantized head. Limits of this measurement: two code prompts, 256 tokens, greedy; prose and
+thinking were not measured.
+
+Same session, the newest Unsloth prebuilt (`b12284-mix-48bb20d`, `nov12-b12284-ub512`) against the
+local build: 34.22 / 38.55 and 38.08 / 44.83, median 38.31 — slower on the two cold requests,
+faster on the two cached ones, with identical text and acceptance within each pair, cause not
+investigated. It held 111 GiB after load against 95–96 GiB for the local build at the same settings
+(8 GiB left available), so it is not a drop-in replacement at ctx 262144.
