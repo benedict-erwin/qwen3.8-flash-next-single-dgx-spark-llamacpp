@@ -165,6 +165,12 @@ listed by `./stack.sh status`), so the long form
 becomes `./stack.sh start llamacpp`. An explicit environment variable still wins over the
 file. `API_KEY` can live there too; `chmod 600 stack.local` if it does.
 
+To keep more than one GGUF at hand (another quant, a re-quantized or patched copy), name each
+one in `stack.local` as `MODEL_<name>=<path to the first shard>` and pick it per start with
+`./stack.sh start llamacpp --model=<name>`. Without the flag the UD-Q4_K_XL download is served
+as before; the MTP head and vision projector stay the same. `./stack.sh status` lists the names
+and shows which model is loaded.
+
 `./stack.sh start llamacpp --clock-cap` additionally caps the GPU clock at 2200 MHz
 (`sudo nvidia-smi -lgc 0,2200`, so it asks for your password). Decode on GB10 is
 memory-bandwidth bound, so community measurements on vLLM put the cost at about 1%
@@ -425,7 +431,7 @@ copy what you like, ignore the rest. [`pi/README.md`](pi/README.md) explains eac
 
 | Script | Purpose |
 |---|---|
-| `stack.sh` | start / stop / status / help for either backend, with a memory preflight; `--clock-cap` for a lower-power GPU clock |
+| `stack.sh` | start / stop / status / help for either backend, with a memory preflight; `--clock-cap` for a lower-power GPU clock; `--model=NAME` for a named GGUF from `stack.local` |
 | `serve.sh` | launches llama-server directly (`--mtp`, `--nmax`, `--pmin`, `--vision`, `--ngram-mod`, `--mmap`, `CTX=`, `BUILD=`, `FORK=`, `UBATCH=`) |
 | `download-parts.sh` | main GGUF, 104 GiB |
 | `download-mtp.sh` | MTP draft head, 3.85 GiB |

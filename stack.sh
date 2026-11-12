@@ -5,6 +5,7 @@
 #   VISION=0 ./stack.sh start llamacpp   # text-only; by default images work once ./download-mmproj.sh ran
 #   ./stack.sh start vllm       # vLLM NVFP4 container, port 18300
 #   ./stack.sh start llamacpp --clock-cap   # same, with the GPU clock capped at 2200 MHz (sudo)
+#   ./stack.sh start llamacpp --model=NAME  # serve the GGUF named by MODEL_NAME=<path> in stack.local
 #   ./stack.sh stop
 #   ./stack.sh status
 #   ./stack.sh help             # every command, flag and env var, with what each needs
@@ -142,7 +143,13 @@ wait_ready() {
   return 1
 }
 
-usage() { echo "usage: $0 {start [llamacpp|vllm] [--clock-cap[=MHZ]] | stop [--clock-reset] | status | help}"; }
+usage() { echo "usage: $0 {start [llamacpp|vllm] [--clock-cap[=MHZ]] [--model=NAME] | stop [--clock-reset] | status | help}"; }
+
+# Model profiles: MODEL_<name>=<path> lines (stack.local or environment), picked with --model=<name>.
+model_profiles() { local v names=(); for v in $(compgen -v MODEL_); do names+=("${v#MODEL_}"); done; echo "${names[*]}"; }
+
+# Profile name of a model path, or nothing when no MODEL_<name> points at it.
+model_profile_of() { local v; for v in $(compgen -v MODEL_); do [ "${!v}" = "$1" ] && { echo "${v#MODEL_}"; return; }; done; }
 
 help() {
   cat <<HELP
@@ -167,6 +174,10 @@ Flags
                          Needs: sudo (you will be asked for your password). Does not survive
                          a reboot. Undo with 'stop --clock-reset' or 'sudo nvidia-smi -rgc'.
   --clock-reset          (stop) Restore the default GPU clocks after stopping. Needs: sudo.
+  --model=NAME           (start llamacpp) Serve the GGUF that MODEL_NAME=<path> points at,
+                         instead of the default. Define the names in stack.local (see below);
+                         'status' lists them and shows which model is loaded. Unknown names
+                         and missing files are refused before anything starts.
   -h, --help             Same as 'help'.
 
 Environment (start llamacpp; all optional, defaults are the measured profile)
@@ -191,18 +202,22 @@ Personal defaults      Put KEY=value lines in ./stack.local (gitignored, never c
                          UBATCH=512
                          LLAMA_ARG_N_PARALLEL=1
                          API_KEY=...        # chmod 600 stack.local if you keep the key here
+                       Model profiles for --model=NAME go here too, one MODEL_<name> each:
+                         MODEL_q3=models/UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00004.gguf
 HELP
 }
 
 # ---- argument parsing: subcommand first, then its positional + flags in any order ----
 cmd="${1:-status}"; shift 2>/dev/null || true
-BACKEND=""; CAP=""; RESET=0
+BACKEND=""; CAP=""; RESET=0; PROFILE=""
 for arg in "$@"; do
   case "$arg" in
     llamacpp|vllm)   BACKEND=$arg ;;
     --clock-cap)     CAP=$CAP_DEFAULT ;;
     --clock-cap=*)   CAP=${arg#--clock-cap=}; check_clock_cap "$CAP" || exit 2 ;;
     --clock-reset)   RESET=1 ;;
+    --model=*)       PROFILE=${arg#--model=}
+                     case "$PROFILE" in ''|*[!A-Za-z0-9_]*) echo "!! --model wants a profile name (letters, digits, _), got '$PROFILE'"; exit 2 ;; esac ;;
     -h|--help)       cmd=help ;;
     *) echo "!! unknown argument '$arg'"; usage; exit 2 ;;
   esac
@@ -212,11 +227,18 @@ case "$cmd" in
 help|-h|--help) help ;;
 start)
   [ -n "$CAP" ] && [ "$RESET" = 1 ] && { echo "!! --clock-reset belongs to stop"; exit 2; }
+  [ -n "$PROFILE" ] && [ "${BACKEND:-llamacpp}" != llamacpp ] && { echo "!! --model belongs to start llamacpp"; exit 2; }
   case "${BACKEND:-llamacpp}" in
   llamacpp)
+    if [ -n "$PROFILE" ]; then
+      pv="MODEL_$PROFILE"
+      [ -n "${!pv:-}" ] || { echo "!! no model profile '$PROFILE' -- add MODEL_$PROFILE=<path> to stack.local (defined: $(pl=$(model_profiles); echo "${pl:-none}"))"; exit 2; }
+      export MODEL="${!pv}"
+    fi
+    if [ -n "${MODEL:-}" ] && [ ! -f "$MODEL" ]; then echo "!! model file not found: $MODEL"; exit 2; fi
     preflight "$NEED_LC" || exit 1
     [ -z "$CAP" ] || apply_clock_cap "$CAP" || exit 1
-    echo ">> starting llama.cpp fork + MTP (port $LC_PORT), ~45s"
+    echo ">> starting llama.cpp fork + MTP (port $LC_PORT), ~45s${MODEL:+, model ${PROFILE:-$MODEL}}"
     # -ub 256: the CUDA backend aborts in cublasGemmEx on some prefill batch
     # sizes (367 and 512 seen in a 300-600 sweep; upstream is affected too).
     # Capping the physical batch at 256 avoided every size in 1-600.
@@ -248,22 +270,31 @@ start)
   esac ;;
 stop)
   [ -n "$CAP" ] && { echo "!! --clock-cap belongs to start"; exit 2; }
+  [ -n "$PROFILE" ] && { echo "!! --model belongs to start"; exit 2; }
   p=$(lc_pid); [ -n "$p" ] && { kill "$p"; echo ">> llama-server ($p) stopped"; }
   vl_up && { docker rm -f "$VL_NAME" >/dev/null; echo ">> container $VL_NAME removed"; }
   for _ in $(seq 1 40); do [ -z "$(lc_pid)" ] && ! vl_up && break; sleep 3; done
   sleep 2; echo ">> $(avail) GiB available now"
   if [ "$RESET" = 1 ]; then reset_clock_cap; fi ;;
 status)
-  if [ -n "$CAP" ] || [ "$RESET" = 1 ]; then echo "!! status takes no flags"; exit 2; fi
+  if [ -n "$CAP" ] || [ "$RESET" = 1 ] || [ -n "$PROFILE" ]; then echo "!! status takes no flags"; exit 2; fi
   p=$(lc_pid)
-  if [ -n "$p" ]; then echo "llama.cpp : running (pid $p, port $LC_PORT)"; else echo "llama.cpp : stopped"; fi
+  if [ -n "$p" ]; then
+    echo "llama.cpp : running (pid $p, port $LC_PORT)"
+    m=$(sed -n 's/^\[serve\] model=//p' runs/serve-current.log 2>/dev/null | head -1)
+    if [ -n "$m" ]; then n=$(model_profile_of "$m"); echo "model     : ${n:+$n -- }$m"; fi
+  else
+    echo "llama.cpp : stopped"
+  fi
   if vl_up; then echo "vLLM      : running (port $VL_PORT)"; else echo "vLLM      : stopped"; fi
   echo "Ollama    : $(ollama_models) model(s) loaded"
   echo "memory    : $(avail) GiB available of 121"
   echo "GPU       : $(gpu_line)"
   if [ -f stack.local ]; then
-    shown=(); for kv in "${LOCAL_VARS[@]}"; do case "$kv" in API_KEY=*) shown+=("API_KEY=<set>") ;; *) shown+=("$kv") ;; esac; done
+    shown=(); for kv in "${LOCAL_VARS[@]}"; do case "$kv" in API_KEY=*) shown+=("API_KEY=<set>") ;; MODEL_*) ;; *) shown+=("$kv") ;; esac; done
     echo "local     : ${shown[*]:-(all overridden by the environment)}"
-  fi ;;
+  fi
+  pl=$(model_profiles)
+  if [ -n "$pl" ]; then echo "profiles  : $pl (start llamacpp --model=NAME)"; fi ;;
 *) usage; exit 2 ;;
 esac
