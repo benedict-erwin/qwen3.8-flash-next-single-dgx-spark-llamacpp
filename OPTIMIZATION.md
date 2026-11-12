@@ -1671,3 +1671,46 @@ difference is the DGX Spark prefetch in the patched build's MMVQ kernel, which w
 help Q4_K and not Q8_0 (2026-10-11); not tested. `requant-mtp-head.sh` produces the head with the
 pinned prebuilt's own `llama-quantize`; the file is byte-identical (sha256) to the one made with
 b12284 and measured above. Shipped as an option (`MTP_MODEL=`), not as the default.
+
+## 2026-11-12: `bench-stream.py` defect #4 fixed, and a draft-length / p-min sweep with the Q4_K head
+
+**Harness.** `bench-stream.py` sent raw `/v1/completions` prompts; on some of them the model's first
+greedy token is an end token (defect #4, 2026-10-09), so a start produced two valid prompts out of
+five, and requests 4–6 repeated 1–3 and hit the prompt cache. It now sends the same prompt as a
+user message to `/v1/chat/completions` with thinking off, over seven source files, so the warm-up
+and six runs are all different, cold prompts. `API=completions` restores the old request; records
+carry `"api"`, and `MAX_TOKENS=` (default 256) lengthens the output. Chat-form numbers are not
+comparable with the earlier labels in `runs/bench-stream2.jsonl`. Not re-run against vLLM.
+Repeatability with `GGML_CUDA_TOPK_DETERMINISTIC=1`: two starts of the same configuration
+(`nov12-sweep-n3-p50`, `-b`) agree within 0.6 tok/s on each of the six prompts.
+
+**Sweep.** `unsloth-hcf`, `-ub 512`, ctx 262144, Q4_K draft head, one start per row, six prompts.
+256 tokens (`nov12-sweep-*`) and, for the baseline and the two best, 768 tokens (`nov12-sweep768-*`);
+acceptance and accepted length from the server log of the 256-token starts:
+
+| nmax / p-min | 256 tok: median / mean | wins of 6 | acceptance | accepted per step | 768 tok: median / mean | wins of 6 |
+|---|---|---|---|---|---|---|
+| 3 / 0.50 (default) | 39.01 / 38.53 | — | 0.78 | 3.04 | 38.95 / 39.08 | — |
+| 3 / 0.50, second start | 38.64 / 38.24 | — | 0.78 | 3.04 | | |
+| 4 / 0.50 | 37.53 / 37.85 | 2 | 0.74 | 3.32 | | |
+| 5 / 0.50 | 39.91 / 38.68 | 4 | 0.70 | 3.66 | | |
+| 4 / 0.65 | 37.97 / 38.10 | 2 | 0.85 | 3.43 | | |
+| 3 / 0.35 | 39.55 / 39.38 | 5 | 0.70 | 3.01 | 40.53 / 40.96 (+4–5%) | 6 |
+| **4 / 0.35** | 41.22 / 40.78 | 4 | 0.67 | 3.53 | **41.98 / 43.24** (+8–11%) | 6 |
+
+At 256 tokens the effect is prompt-dependent (4 / 0.35: two prompts +14–15%, two −2–4%); at 768
+tokens both p-min 0.35 rows beat the baseline on every prompt (4 / 0.35: 40.3–51.9 against
+36.9–41.9 tok/s).
+
+**Other workloads** (`bench-chat.py`, 400 tokens, same build and head;
+`runs/bench-chat-2026-11-12.jsonl`, labels `chat-hcf-mtpq4k-a/b` for 3 / 0.50 and
+`chat-hcf-mtpq4k-n4-p35`, `-n3-p35`):
+
+| nmax / p-min | Prose, thinking off | acceptance | Thinking on | acceptance |
+|---|---|---|---|---|
+| 3 / 0.50, two starts | 34.29 / 35.25 tok/s | 0.62 | 41.34 / 40.89 tok/s | 0.82 |
+| 3 / 0.35 | 32.01 (−8%) | 0.50 | 42.67 (+4%) | 0.73 |
+| 4 / 0.35 | 32.26 (−7%) | 0.43 | 45.53 (+11%) | 0.71 |
+
+So 4 / 0.35 is a trade, not a free gain: about +10% on code and on thinking, about −7% on prose,
+where acceptance falls to 0.43 and the extra drafts are mostly wasted. Defaults were not changed.
