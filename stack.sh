@@ -250,7 +250,9 @@ start)
     # NMAX / PMIN override the measured defaults (3 / 0.50) for speculative sweeps; MTP=0 disables
     # speculative decoding entirely (diagnostics only -- decode drops to ~24 tok/s).
     # p-min 0.50 has been the default since 2026-09-06: +10% decode over 0.75 on matched prompts,
-    # same answers (the target verifies every draft). PMIN=0.75 restores the old behaviour.
+    # every emitted token is still the target's own choice (it verifies every draft). The text is not
+    # guaranteed byte-identical across NMAX/PMIN values: verification batches differ, so near-ties can
+    # resolve differently. PMIN=0.75 restores the old behaviour.
     SPEC=(--mtp --nmax "${NMAX:-3}" --pmin "${PMIN:-0.50}"); [ "${MTP:-1}" = 0 ] && SPEC=()
     UBATCH="${UBATCH:-256}" BUILD=fork nohup ./serve.sh "${SPEC[@]}" "${VIS[@]}" > runs/serve-current.log 2>&1 &
     if wait_ready "$LC_PORT" 300; then

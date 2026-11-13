@@ -56,9 +56,11 @@ the next token drops below `--spec-draft-p-min`. The recipe shipped 0.75 until
 | accepted draft tokens per step | 3.21 | 3.30 |
 | TTFT, RAM | unchanged | unchanged |
 
-**What it does not change:** the answer. The target model verifies every drafted token and
-keeps only what it would have produced itself, so p-min sets how much draft work is
-wasted, not what comes out. **What it costs:** more rejected drafts, so the gain shrinks on
+**What it does not change:** who decides the answer. The target model verifies every drafted
+token and keeps only what it would have chosen itself, so p-min sets how much draft work is
+wasted, not the quality of what comes out. The text is not guaranteed byte-identical across
+draft settings, though: verification batches differ, so a near-tie between two tokens can
+resolve differently. **What it costs:** more rejected drafts, so the gain shrinks on
 text the drafter predicts badly. Coding-agent traffic is easy for it — real sessions here
 run at 0.84–0.91 acceptance even at 0.75, far above the ~0.4 where a lower p-min would
 start to lose. `PMIN=0.75 ./stack.sh start llamacpp` restores the old setting; `nmax 4`

@@ -81,7 +81,8 @@ not guessed:
 | Bind address | `127.0.0.1:18080`, no auth | `serve.sh` (`HOST=`, `API_KEY=`) |
 
 `p-min 0.50` has been the default since 2026-09-06: +10% decode over 0.75 on matched
-prompts, with the same answers, because the target model verifies every drafted token.
+prompts. The target model still verifies every drafted token, so answer quality is unchanged;
+the exact text can differ between draft settings when two tokens are nearly tied.
 `PMIN=0.75` restores the old threshold. `MTP=0` turns speculative decoding off
 entirely — decode drops to ~24 tok/s, and it is the only way to get bit-reproducible
 greedy output (`OPTIMIZATION.md`, 2026-09-06).
