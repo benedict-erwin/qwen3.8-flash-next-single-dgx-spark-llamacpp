@@ -1,0 +1,56 @@
+span 9.865 s, GPU busy 8.580 s (87.0%), idle 1.286 s; target forwards 123 (verify widths {1: 6, 2: 3, 3: 5, 5: 109}), draft forwards 462
+family                                   n   time ms       MiB     GB/s us/launch
+MoE gate+up t12 (5 tok)               5123    1730.4    450264      273    337.8
+MoE down t7 (5 tok)                   4687     937.3    274629      307    200.0
+dense lm_head draft                    462     782.8    157549      211   1694.3
+dense attn_qkv/ple_key                4555     623.5    120992      203    136.9
+dense ssm_out/attn_output             7001     575.2    111578      203     82.2
+dense attn_gate                       4428     545.7     70571      136    123.2
+other: elementwise                  168028     391.0         0        -      2.3
+dense lm_head target                   123     390.1     79229      213   3171.5
+dense hc_down                        13440     331.2     44625      141     24.6
+dense attn_q                          2061     322.3     65694      214    156.4
+dense hc_up                          13436     258.9     44612      181     19.3
+other: gated_delta_net_cuda           4428     254.1         0        -     57.4
+other: quantize_q8_1                 81999     191.4         0        -      2.3
+other: mul_mat_f                      8280     176.9         0        -     21.4
+MoE down t8 (5 tok)                    545     162.7     45239      292    298.5
+dense shexp gate/up                  12030     161.0     21137      138     13.4
+other: mm_skinny_f32                 15840     101.0         0        -      6.4
+other: k_get_rows_float_vec           4440      75.8         0        -     17.1
+MoE gate+up t8 (1 tok)                 462      75.5     15340      213    163.5
+dense shexp_down                      6444      70.1     10698      160     10.9
+MoE down t8 (1 tok)                    605      59.1      9031      160     97.7
+MoE gate+up t13 (5 tok)                109      54.0     11709      227    495.7
+MoE gate+up t12 (3 tok)                235      53.5     12393      243    227.5
+other: mul_mat_vec_f                  4476      46.3         0        -     10.3
+dense attn_k/v                        4122      40.5      5475      142      9.8
+other: cutlass::Kernel2               9228      39.5         0        -      4.3
+other: ssm_conv_f32                   4428      35.0         0        -      7.9
+other: l2_norm_f32                    8856      34.7         0        -      3.9
+other: topk_moe_cuda                  6366      33.4         0        -      5.2
+MoE down t7 (3 tok)                    215      29.5      7559      269    137.3
+MoE gate+up t12 (1 tok)                235      26.8      4131      162    113.9
+other: k_get_rows_float               7986      26.3         0        -      3.3
+other: flash_attn_ext_f16             1498      24.3         0        -     16.2
+MoE gate+up t12 (2 tok)                141      22.9      4957      227    162.4
+other: cub::_V_300200_SM_1210::det    2772      22.1         0        -      8.0
+other: k_set_rows_quant               4428      21.3         0        -      4.8
+other: cublasLt::splitKreduce_kern    9228      15.2         0        -      1.6
+MoE down t7 (1 tok)                    215      14.6      2520      181     67.9
+other: moe_weighted_reduction_f32     6366      14.6         0        -      2.3
+other: rope_multi                     7074      14.2         0        -      2.0
+other: k_argsort_f32_i32              1476      14.0         0        -      9.5
+MoE gate+up t12 (4 tok)                 47      13.6      3305      255    289.4
+MoE down t7 (2 tok)                    129      13.4      3023      237    103.6
+other: fwht_cuda                      5904      11.0         0        -      1.9
+MoE down t7 (4 tok)                     43       7.5      2016      283    174.0
+other: flash_attn_ext_vec              563       6.7         0        -     12.0
+other: dequantize_block_q8_0_f16      2760       6.5         0        -      2.3
+other: small gemv                     1047       5.4         0        -      5.2
+other: flash_attn_stream_k_fixup_u    1498       5.2         0        -      3.4
+MoE down t8 (3 tok)                     25       5.0      1245      260    200.5
+weight-reading kernels: 7.314 s for 1543.94 GiB = 227 GB/s (83% of 273); other kernels 1.585 s
+bytes at 273 GB/s: 6.073 s; at 240 GB/s: 6.907 s
+share of span: weight reads at bus speed 61.6%, weight-read shortfall 12.6%, other kernels 16.1%, idle 13.0%  (kernel overlap 3.2%)
+unmapped: {('mul_mat_vec_q', 8, 4, 1): 1047}

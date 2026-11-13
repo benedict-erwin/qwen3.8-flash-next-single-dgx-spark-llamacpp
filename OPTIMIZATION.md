@@ -1714,3 +1714,56 @@ tokens both p-min 0.35 rows beat the baseline on every prompt (4 / 0.35: 40.3–
 
 So 4 / 0.35 is a trade, not a free gain: about +10% on code and on thinking, about −7% on prose,
 where acceptance falls to 0.43 and the extra drafts are mostly wasted. Defaults were not changed.
+
+## 2026-11-14: Where a decode step's time goes, counted in bytes — MoE is at bus speed, the dense path is not
+
+Question: how much could a decode path written specifically for this model and this machine gain
+over the current build? That depends on how much of a step is unavoidable memory traffic. The
+2026-10-09 profile gave kernel shares; this one adds the bytes each weight-reading kernel has to read.
+
+**Method.** Nsight Systems 2025.3.2 (`-t cuda --cuda-graph-trace=node`) through the `LAUNCHER=`
+hook, stock model, `unsloth-hcf` build, Q4_K draft head, `nmax 4 / p-min 0.35`, ctx 262144. The
+prompt is evaluated and cached first, so each capture holds decode only: 384 tokens of prose and
+384 tokens of code. `bytes.py` maps every `mul_mat_vec_q` / `mul_mat_vec_q_moe` launch to the matrix
+it reads: quantization type from the template, rows from the launch grid, columns from the GGUF
+tensor inventory. Everything is in `runs/profile-2026-11-14/` (`prof2.sh`, `prof2.py`, `bytes.py`,
+`decode-{prose,code}-bytes.txt`, `timings.jsonl`). Capture overhead: 39.06 vs 39.67 tok/s (prose)
+and 57.02 vs 58.09 (code) without nsys, labels `nov14-nsys` / `nov14-plain`.
+
+Two limits of the method. Durations are measured; bytes are computed, because
+`nsys --gpu-metrics` needs admin counter access. And the expert byte count is an upper bound:
+tokens verified in the same batch often select the same expert, which is then read once.
+
+| Share of decode wall time | Prose (9.87 s) | Code (6.77 s) |
+|---|---|---|
+| Dense weights and both vocabulary heads, if read at 273 GB/s | 28.5% | 27.0% |
+| MoE experts (measured kernel time) | 32.5% | 34.8% |
+| Dense kernels running below bus speed | 13.1% | 13.1% |
+| Kernels that read no weights | 16.1% | 17.2% |
+| GPU idle between kernels | 13.0% | 11.2% |
+
+The columns sum to 103% because kernels overlap by 3% (programmatic dependent launch).
+
+| Kernel group (prose capture) | Time | Effective rate |
+|---|---|---|
+| MoE experts | 3,206 ms | 277 GB/s on the upper-bound byte count, i.e. at bus speed |
+| Dense attn/ssm: `attn_qkv`, `ssm_out`, `attn_output`, `attn_gate`, `attn_q` | 2,067 ms | 187 GB/s |
+| Small dense: `hc_up`, `hc_down`, shared expert, `attn_k/v` | 862 ms | 154 GB/s |
+| Draft head `output.weight` (Q4_K), 462 forwards | 783 ms | 211 GB/s |
+| Target `output.weight` (Q8_0), 123 forwards | 390 ms | 213 GB/s |
+| No weights: elementwise 391 ms (168k launches), GDN core 254 ms, `quantize_q8_1` 191 ms, `mul_mat_f` 177 ms, rest | 1,585 ms | — |
+
+Inside the dense group `attn_gate` is still the slow one (136 GB/s, the effect described on
+2026-10-11), `attn_qkv` and `ssm_out` run at 203 GB/s and `attn_q` at 214 GB/s.
+
+**Reading.**
+
+- The expert path has nothing left: it already runs at the bus rate.
+- What a better decode path can attack is the last three rows of the first table, 42% of the wall
+  time. Removing all of it would be +64% (prose: 9.87 s → 6.02 s); recovering half of it is about
+  +27% `[estimate]`. A purpose-built engine therefore has a ceiling near 50 tok/s on this weight
+  format, not the 55–69 tok/s other stacks report with NVFP4 — those also read fewer bytes.
+- The dense attn/ssm and small dense tensors take 29.7% of the wall time and are all Q8_0.
+  Requantizing them to Q5_K (8.5 → 5.5 bits per weight) would remove about a third of those bytes,
+  about +12% `[estimate]`; Q6_K about +7% `[estimate]`. Unlike the kernel work this changes what the
+  model computes, so it needs the full accuracy gate.

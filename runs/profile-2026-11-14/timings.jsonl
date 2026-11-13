@@ -1,0 +1,4 @@
+{"label": "nov14-nsys", "kind": "prose", "step": "run", "prompt_n": 4, "cache_n": 43, "predicted_n": 384, "predicted_ms": 9806.024, "predicted_tps": 39.05762417061186, "draft_n": 449, "draft_n_accepted": 261, "stop": "limit"}
+{"label": "nov14-nsys", "kind": "code", "step": "run", "prompt_n": 4, "cache_n": 2492, "predicted_n": 384, "predicted_ms": 6717.212, "predicted_tps": 57.01770317804469, "draft_n": 311, "draft_n_accepted": 305, "stop": "limit"}
+{"label": "nov14-plain", "kind": "prose", "step": "run", "prompt_n": 4, "cache_n": 43, "predicted_n": 384, "predicted_ms": 9654.915, "predicted_tps": 39.668914744459165, "draft_n": 449, "draft_n_accepted": 261, "stop": "limit"}
+{"label": "nov14-plain", "kind": "code", "step": "run", "prompt_n": 4, "cache_n": 2492, "predicted_n": 384, "predicted_ms": 6593.367, "predicted_tps": 58.08868215586968, "draft_n": 311, "draft_n_accepted": 305, "stop": "limit"}
