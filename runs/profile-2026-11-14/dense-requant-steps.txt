@@ -1,0 +1,7 @@
+# per-step summary from the server logs of the six starts (requests of >=700 tokens only): tokens, verification steps (= tokens - accepted drafts), ms per step, tokens per step, drafts per step, acceptance, tok/s
+nov14-dense-q5k-a          tok  4608  steps  1409  ms/step 78.2  tok/step 3.27  drafts/step 3.60  acc 0.631  tps 41.84
+nov14-dense-q5k-b          tok  4608  steps  1409  ms/step 79.2  tok/step 3.27  drafts/step 3.60  acc 0.631  tps 41.29
+nov14-dense-q6k-a          tok  5376  steps  1613  ms/step 80.9  tok/step 3.33  drafts/step 3.58  acc 0.651  tps 41.21
+nov14-dense-q6k-b          tok  5376  steps  1613  ms/step 81.5  tok/step 3.33  drafts/step 3.58  acc 0.651  tps 40.87
+nov14-dense-stock-a        tok  5335  steps  1479  ms/step 83.8  tok/step 3.61  drafts/step 3.71  acc 0.703  tps 43.07
+nov14-dense-stock-b        tok  5335  steps  1479  ms/step 83.1  tok/step 3.61  drafts/step 3.71  acc 0.703  tps 43.41

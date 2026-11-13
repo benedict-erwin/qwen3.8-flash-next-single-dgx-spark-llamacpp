@@ -1767,3 +1767,42 @@ Inside the dense group `attn_gate` is still the slow one (136 GB/s, the effect d
   Requantizing them to Q5_K (8.5 → 5.5 bits per weight) would remove about a third of those bytes,
   about +12% `[estimate]`; Q6_K about +7% `[estimate]`. Unlike the kernel work this changes what the
   model computes, so it needs the full accuracy gate.
+
+## 2026-11-14: Requantizing the target's dense attn/ssm weights (Q8_0 → Q5_K / Q6_K) — the step gets faster, the draft head gets worse, net loss
+
+The byte profile above predicted about +8% from Q5_K on the large dense tensors. Tested, it loses.
+
+**What was changed.** 133 tensors, 2,704 MiB per forward: `attn_qkv`, `ple_key`, `attn_output`,
+`ssm_out`, `attn_gate`, `attn_q`. Experts, the PLE table, both vocabulary heads, the shared expert
+and the hyper-connection matrices were left alone. Made with
+`llama-quantize --allow-requantize --keep-split --tensor-type-file <list>`, where the list pins
+every tensor by anchored name to its current type and only the 133 to the new one (81 s per
+variant). Checked afterwards: the other 1,091 tensors are byte-identical to the stock shards
+(`runs/profile-2026-11-14/dense-requant-verify.py`). File size 106,166 → 105,212 MiB (Q5_K) and
+105,550 MiB (Q6_K).
+
+**Speed** (`bench-stream.py`, chat form, 6 prompts × 768 tokens, `unsloth-hcf`, Q4_K draft head,
+`nmax 4 / p-min 0.35`, starts alternating stock → Q5_K → Q6_K twice; `runs/bench-stream2.jsonl`,
+labels `nov14-dense-*`; per-step figures from the server logs in
+`runs/profile-2026-11-14/dense-requant-steps.txt`):
+
+| Target | Median tok/s (two starts) | Mean tok/s | ms per verification step | Tokens per step | Acceptance |
+|---|---|---|---|---|---|
+| stock (dense Q8_0) | 42.04 / 42.70 | 43.52 / 43.79 | 83.8 / 83.1 | 3.61 | 0.703 |
+| dense Q5_K | 42.18 / 41.78 | 42.27 / 41.70 | 78.2 / 79.2 | 3.27 | 0.631 |
+| dense Q6_K | 41.57 / 41.22 | 41.68 / 41.23 | 80.9 / 81.5 | 3.33 | 0.651 |
+
+Per prompt against the stock start of the same round, Q5_K is −1.8% and −3.8% on average and
+Q6_K −3.7% and −5.5%.
+
+**Reading.** The bandwidth saving is real: a verification step is 5.7% shorter with Q5_K and 2.7%
+with Q6_K. But each step yields fewer tokens, 3.61 → 3.27 (−9%) and 3.33 (−8%), because draft
+acceptance falls from 0.70 to 0.63–0.65. The draft head was trained against the hidden states of
+the original weights and reads them directly, so perturbing the target makes its guesses match the
+target less often `[Inference]`. The generated text differs between targets, so part of the
+acceptance difference could be the text rather than the head; the drop is the same size in both
+rounds and on both variants.
+
+No accuracy gate was run, since there is no speed to buy. The variants were deleted. For the
+remaining budget this closes the "read fewer target bytes" route on GGUF as long as the stock draft
+head is used; what is left is the kernel-side 42% from the profile above.
