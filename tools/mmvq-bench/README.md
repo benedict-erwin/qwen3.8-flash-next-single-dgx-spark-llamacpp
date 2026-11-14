@@ -13,9 +13,11 @@ does. Background and conclusions: `OPTIMIZATION.md`, 2026-10-11.
 ./bench_shapes.sh base           # every decode shape of this model, 1-4 columns
 GGML_CUDA_MMVQ_PREFETCH=0 ./bench_shapes.sh pf0   # same, Spark prefetch off (HC_FUSE=1 builds)
 ./gap_exp.sh                     # how a DRAM-idle phase before a GEMV slows it down
+./overlap_bench 2560 6144 5 36   # can a GEMV overlap the GDN core on a second stream? (no: 2026-11-14)
 ```
 
 Stop the server first (`./stack.sh stop`): the harness allocates on the same GPU and the numbers
 are bandwidth measurements. `results/` holds the 2026-10-11 output behind the tables in
 `OPTIMIZATION.md` (`shapes-base.txt` before the prefetch patch, `shapes-pf.txt` with it,
-`gap-base.txt` the post-idle experiment).
+`gap-base.txt` the post-idle experiment, `overlap-2026-11-14.txt` the two-stream test and the
+5-column baseline).

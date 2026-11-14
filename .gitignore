@@ -13,4 +13,5 @@ stack.local
 
 tmp/
 tools/mmvq-bench/mmvq_bench
+tools/mmvq-bench/overlap_bench
 __pycache__/

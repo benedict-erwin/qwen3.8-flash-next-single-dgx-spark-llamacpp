@@ -7,4 +7,6 @@ TREE="${TREE:-../../forks/src-mix-b10798}"
 LIB="$(cd "$TREE/build/bin" && pwd)" || { echo "no build under $TREE -- run ./build-fork.sh first" >&2; exit 1; }
 g++ -O2 -std=c++17 -I "$TREE/ggml/include" mmvq_bench.cpp -o mmvq_bench \
   -L "$LIB" -lggml -lggml-base -lggml-cuda -Wl,-rpath,"$LIB"
-echo "built ./mmvq_bench against $TREE"
+g++ -O2 -std=c++17 -pthread -I "$TREE/ggml/include" overlap_bench.cpp -o overlap_bench \
+  -L "$LIB" -lggml -lggml-base -lggml-cuda -Wl,-rpath,"$LIB"
+echo "built ./mmvq_bench and ./overlap_bench against $TREE"

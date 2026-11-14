@@ -1806,3 +1806,41 @@ rounds and on both variants.
 No accuracy gate was run, since there is no speed to buy. The variants were deleted. For the
 remaining budget this closes the "read fewer target bytes" route on GGUF as long as the stock draft
 head is used; what is left is the kernel-side 42% from the profile above.
+
+## 2026-11-14: Kernel-side pre-test for the dense shortfall — no go, before any patch
+
+The byte profile above left 13% of decode in dense kernels below bus speed. Before touching the
+fork, two harness checks (`tools/mmvq-bench/`, output in `results/overlap-2026-11-14.txt`, server
+stopped, same `unsloth-hcf` library the server loads).
+
+**Small dense matrices are already at their isolated rate.** Five token columns, cold L2:
+
+| Shape | Server (prose capture) | Harness |
+|---|---|---|
+| `hc_down` 10240 → 320 | 24.6 µs, 141 GB/s | 26.5 µs, 131 GB/s |
+| `hc_up` 320 → 10240 | 19.3 µs, 181 GB/s | 18.7 µs, 186 GB/s |
+| shared expert gate/up 2560 → 640 | 13.4 µs, 138 GB/s | 12.1 µs, 144 GB/s |
+| shared expert down 640 → 2560 | 10.9 µs, 160 GB/s | 10.6 µs, 164 GB/s |
+
+Nothing is lost to scheduling here; these 1.7–3.3 MB launches are bounded by per-launch cost.
+Only a different kernel for short matrices could move them, for under 1% of a step `[estimate]`.
+
+**`attn_gate` cannot overlap the GatedDeltaNet core.** In isolation the gate GEMV runs at
+225 GB/s (74 µs); in the server it takes 123 µs because it follows ~170 µs without a bandwidth
+kernel (2026-10-11). The remaining idea was to run it on a second stream while the core runs.
+`overlap_bench` does exactly that with the real `gated_delta_net` op on this model's shapes:
+
+| | GEMV 2560 → 6144, n=5 | GDN core |
+|---|---|---|
+| Alone | 76.0 µs | 31.3 µs |
+| Both streams busy | 106.7 µs | 100.9 µs |
+
+Each kernel waits for the other: the combined rate is 1.00–1.02× a single stream (2.0 would be
+free overlap), for both `attn_gate` and `ssm_out` shapes at 1 and 5 columns. Multi-stream execution
+(`GGML_CUDA_GRAPH_OPT`) would therefore gain nothing even if its fork/join detector matched this
+graph. Moving the gate GEMV ahead of the core would only hand the post-idle penalty to `ssm_out`,
+the next bandwidth kernel `[Inference]`.
+
+So the dense shortfall is not recoverable by kernel or scheduling work on this build. What is left
+of the 2026-11-14 ceiling is the launch count (elementwise and `quantize_q8_1`, 6% of a step, plus
+part of the idle time), which has no cheap pre-test.
